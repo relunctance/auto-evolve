@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Built binaries
+*.deb
+*.AppImage
+
+# Embedded git repositories (track as submodule or don't track)
+context-hawk/
+hawk-bridge/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# OpenClaw workspace state (don't commit these)
+.openclaw/
+.clawhub/
+.workspace/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
