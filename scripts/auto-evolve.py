@@ -3329,6 +3329,27 @@ class FourPerspectiveScanner:
         "TECH":    "references/code-standards.md",
     }
 
+    # Numeric weights per project type (4 perspectives)
+    # Values: USER, PRODUCT, PROJECT, TECH
+    PERSPECTIVE_WEIGHTS: dict[str, tuple[float, float, float, float]] = {
+        "前端应用":    (0.35, 0.25, 0.15, 0.25),
+        "后端服务":    (0.25, 0.20, 0.20, 0.35),
+        "智能体/AI": (0.25, 0.30, 0.20, 0.25),
+        "基础设施":    (0.15, 0.20, 0.25, 0.40),
+        "内容与文档": (0.30, 0.35, 0.20, 0.15),
+        "通用项目":    (0.25, 0.25, 0.25, 0.25),
+    }
+
+    # Priority order for each project type (which perspectives to check first)
+    PERSPECTIVE_PRIORITY: dict[str, list[str]] = {
+        "前端应用":    ["USER", "PRODUCT", "TECH", "PROJECT"],
+        "后端服务":    ["TECH", "USER", "PRODUCT", "PROJECT"],
+        "智能体/AI": ["PRODUCT", "USER", "TECH", "PROJECT"],
+        "基础设施":    ["TECH", "PROJECT", "PRODUCT", "USER"],
+        "内容与文档": ["PRODUCT", "USER", "PROJECT", "TECH"],
+        "通用项目":    ["USER", "PRODUCT", "PROJECT", "TECH"],
+    }
+
     # Built-in default reference docs (used when project-standard is not installed)
     # v4.1: These ensure auto-evolve works standalone without project-standard
     DEFAULT_REF_DOCS = {
@@ -3633,14 +3654,246 @@ class FourPerspectiveScanner:
         except Exception:
             return f"No learnings history yet for {self.effective_persona}."
 
+    # ---- P1: Scan History Persistence ----------------------------------------
+
+    def _scan_history_file(self, repo_path: Path) -> Path:
+        """Path to scan history JSON for a repo."""
+        ae_dir = repo_path / ".auto-evolve"
+        ae_dir.mkdir(exist_ok=True)
+        return ae_dir / "scan-history.json"
+
+    def _load_scan_history(self, repo_path: Path) -> dict[str, list[dict]]:
+        """Load previous scan findings grouped by perspective.
+
+        Returns:
+            { "USER": [{description, category, impact_score}, ...], ... }
+        """
+        history_file = self._scan_history_file(repo_path)
+        if not history_file.exists():
+            return {}
+        try:
+            data = json.loads(history_file.read_text(encoding="utf-8"))
+            # data is { repo_path: { perspective: [findings] } }
+            if isinstance(data, dict):
+                # Return the first (and usually only) repo entry
+                for v in data.values():
+                    if isinstance(v, dict):
+                        return v
+            return {}
+        except Exception:
+            return {}
+
+    def _save_scan_history(self, repo_path: Path, findings: list["PerspectiveFinding"]) -> None:
+        """Save current scan findings to history for future comparison."""
+        history_file = self._scan_history_file(repo_path)
+        try:
+            # Group findings by perspective
+            by_perspective: dict[str, list[dict]] = {}
+            for f in findings:
+                persp = f.perspective
+                if persp not in by_perspective:
+                    by_perspective[persp] = []
+                by_perspective[persp].append({
+                    "description": f.description,
+                    "category": f.category,
+                    "impact_score": f.impact_score,
+                    "file_path": f.file_path,
+                    "timestamp": __import__("datetime").datetime.now().isoformat(),
+                })
+            # Merge with existing history, keeping only recent entries
+            existing = {}
+            if history_file.exists():
+                try:
+                    existing = json.loads(history_file.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+            # Structure: { repo_path: by_perspective }
+            key = str(repo_path.resolve())
+            existing = {key: by_perspective}
+            history_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"  [WARN] Could not save scan history: {e}")
+
+    def _is_new_finding(self, finding: "PerspectiveFinding", prev_findings: list[dict]) -> bool:
+        """Check if a finding is NEW (not in previous scan) or still open."""
+        if not prev_findings:
+            return True
+        # Strip [NEW] prefix for comparison
+        desc = finding.description.replace("[NEW] ", "")
+        for prev in prev_findings:
+            prev_desc = prev.get("description", "").replace("[NEW] ", "")
+            if prev_desc == desc and finding.category == prev.get("category"):
+                return False
+        return True
+
+    # ---- P2: GitHub Integration ---------------------------------------------
+
+    def post_github_comment(self, repo_path: Path, findings: list["PerspectiveFinding"],
+                             github_event: str = "scan") -> bool:
+        """Post scan results as a GitHub PR comment or create an issue.
+
+        Uses GITHUB_TOKEN env var for API authentication.
+        """
+        import os, urllib.request, urllib.parse
+
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            print("[GitHub] GITHUB_TOKEN not set, skipping comment")
+            return False
+
+        # Try to detect GitHub context from git remote
+        remote_url = self._get_github_remote(repo_path)
+        if not remote_url:
+            print("[GitHub] Could not detect GitHub remote, skipping")
+            return False
+
+        owner, repo = remote_url
+
+        # Format findings as GitHub markdown
+        body = self._format_github_comment(findings, github_event)
+
+        # Determine if this is a PR comment or issue
+        pr_number = os.environ.get("PR_NUMBER", "")
+        issue_number = os.environ.get("ISSUE_NUMBER", "")
+
+        if pr_number:
+            return self._post_pr_comment(token, owner, repo, pr_number, body)
+        elif issue_number:
+            return self._create_issue_comment(token, owner, repo, issue_number, body)
+        else:
+            # Default: create an issue
+            return self._create_issue(token, owner, repo, body)
+
+    def _get_github_remote(self, repo_path: Path) -> tuple[str, str] | None:
+        """Get (owner, repo) from git remote URL."""
+        try:
+            result = __import__("subprocess").run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(repo_path), capture_output=True, text=True, timeout=10
+            )
+            url = result.stdout.strip()
+            # git@github.com:owner/repo.git or https://github.com/owner/repo.git
+            if "github.com" in url:
+                if url.startswith("git@"):
+                    parts = url.split(":")[1].rstrip(".git").split("/")
+                else:
+                    parts = url.split("github.com/")[1].rstrip(".git").split("/")
+                if len(parts) >= 2:
+                    return parts[0], parts[1]
+        except Exception:
+            pass
+        return None
+
+    def _format_github_comment(self, findings: list["PerspectiveFinding"],
+                                event: str) -> str:
+        """Format findings as GitHub-flavored markdown."""
+        lines = [
+            f"## 🔍 Auto-Evolve Scan Results (`{event}`)",
+            "",
+            f"Found **{len(findings)}** finding(s):",
+            "",
+        ]
+
+        by_perspective: dict[str, list["PerspectiveFinding"]] = {}
+        for f in findings:
+            by_perspective.setdefault(f.perspective, []).append(f)
+
+        emoji_map = {"USER": "👤", "PRODUCT": "📦", "PROJECT": "🏗", "TECH": "⚙️"}
+        label_map = {
+            "USER": "User Perspective",
+            "PRODUCT": "Product Perspective",
+            "PROJECT": "Project Perspective",
+            "TECH": "Tech Perspective",
+        }
+
+        for persp, persp_findings in by_perspective.items():
+            lines.append(f"### {emoji_map.get(persp, '📋')} {label_map.get(persp, persp)}")
+            for f in persp_findings:
+                is_new = "[NEW]" in f.description
+                marker = "🆕 " if is_new else "  "
+                lines.append(f"{marker}**[{f.impact_score:.0%}]** {f.description}")
+                if f.file_path:
+                    lines.append(f"   - File: `{f.file_path}`")
+                if f.suggested_direction:
+                    lines.append(f"   - Fix: {f.suggested_direction}")
+                lines.append("")
+
+        lines.append("---")
+        lines.append("_Auto-evolved by [auto-evolve](https://github.com/relunctance/auto-evolve)_")
+        return "\n".join(lines)
+
+    def _post_pr_comment(self, token: str, owner: str, repo: str,
+                         pr_number: str, body: str) -> bool:
+        """Post a comment on a GitHub PR."""
+        import urllib.request, json
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+        data = json.dumps({"body": body}).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "auto-evolve/4.2")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status in (200, 201):
+                    print(f"[GitHub] Posted comment on PR #{pr_number}")
+                    return True
+        except Exception as e:
+            print(f"[GitHub] Failed to post PR comment: {e}")
+        return False
+
+    def _create_issue(self, token: str, owner: str, repo: str,
+                       body: str, title: str = "Auto-Evolve Scan Results") -> bool:
+        """Create a GitHub issue with scan results."""
+        import urllib.request, json
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues"
+        data = json.dumps({"title": title, "body": body, "labels": ["auto-evolve"]}).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "auto-evolve/4.2")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status in (200, 201):
+                    result = json.loads(resp.read())
+                    print(f"[GitHub] Created issue #{result.get('number', '?')}")
+                    return True
+        except Exception as e:
+            print(f"[GitHub] Failed to create issue: {e}")
+        return False
+
+    def _create_issue_comment(self, token: str, owner: str, repo: str,
+                               issue_number: str, body: str) -> bool:
+        """Post a comment on an existing GitHub issue."""
+        import urllib.request, json
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        data = json.dumps({"body": body}).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "auto-evolve/4.2")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status in (200, 201):
+                    print(f"[GitHub] Posted comment on issue #{issue_number}")
+                    return True
+        except Exception as e:
+            print(f"[GitHub] Failed to post issue comment: {e}")
+        return False
+
     def scan(self) -> list[PerspectiveFinding]:
         """
         Run all four perspective scanners and merge their findings.
 
         Workflow:
           1. Detect project type (via project-standard/project-types.md)
-          2. Scan from 4 perspectives (USER / PRODUCT / PROJECT / TECH)
-          3. Each perspective uses project-standard's reference docs as evaluation criteria
+          2. Scan from 4 perspectives in priority order (project-type-dependent)
+          3. Each perspective uses project-standard's reference docs + weights
         """
         all_findings: list[PerspectiveFinding] = []
         print(f"[FourPerspectiveScanner] Starting 4-perspective scan of {len(self.repos)} repos...")
@@ -3651,62 +3904,94 @@ class FourPerspectiveScanner:
             if not repo_path.exists():
                 continue
 
-            # Step 1: Detect project type using project-standard
-            project_type, weights = self._detect_project_type(repo_path)
-            print(f"\n  📋 Project type: {project_type} ({weights})")
+            # Step 1: Detect project type
+            project_type, weights_str = self._detect_project_type(repo_path)
+            numeric_weights = self.PERSPECTIVE_WEIGHTS.get(project_type, (0.25, 0.25, 0.25, 0.25))
+            priority_order = self.PERSPECTIVE_PRIORITY.get(project_type, ["USER", "PRODUCT", "PROJECT", "TECH"])
+            weight_map = dict(zip(["USER", "PRODUCT", "PROJECT", "TECH"], numeric_weights))
 
-            print(f"\n  Scanning {repo_path.name} from 4 perspectives...")
-            for perspective in ["USER", "PRODUCT", "PROJECT", "TECH"]:
+            print(f"\n  [TYPE] {project_type}")
+            print(f"  [WEIGHTS] " + " / ".join(f"{p}={weight_map[p]*100:.0f}%" for p in priority_order))
+
+            # Load scan history for this repo (P1: persistence)
+            scan_history = self._load_scan_history(repo_path)
+
+            # Step 2: Scan in priority order
+            print(f"\n  Scanning {repo_path.name} in order: {' → '.join(priority_order)}")
+            for perspective in priority_order:
                 meta = PERSPECTIVE_META[perspective]
-                print(f"    [{perspective}] {meta['icon']} {meta['label']}...")
-                findings = self._scan_by_perspective(repo, perspective, project_type)
+                weight = weight_map[perspective]
+                print(f"    [{perspective}] {meta['icon']} {meta['label']} (weight={weight:.0%})...")
+                findings = self._scan_by_perspective(
+                    repo, perspective, project_type,
+                    weight=weight,
+                    prev_findings=scan_history.get(perspective, [])
+                )
                 if findings:
                     print(f"      → Found {len(findings)} finding(s)")
+                    # Mark which are new vs still open
+                    for f in findings:
+                        is_new = self._is_new_finding(f, scan_history.get(perspective, []))
+                        if is_new:
+                            f.description = f"[NEW] {f.description}"
                 all_findings.extend(findings)
+
+            # Save updated scan history
+            self._save_scan_history(repo_path, all_findings)
 
         all_findings.sort(key=lambda f: f.impact_score, reverse=True)
         return all_findings
 
     def _scan_by_perspective(self, repo: Repository, perspective: str,
-                              project_type: str = "通用项目") -> list[PerspectiveFinding]:
-        """Dispatch to the right perspective scanner, passing project type."""
+                              project_type: str = "通用项目",
+                              weight: float = 0.25,
+                              prev_findings: list = None) -> list[PerspectiveFinding]:
+        """Dispatch to the right perspective scanner, passing project type + weight."""
         if perspective == "USER":
-            return self._scan_user(repo, project_type)
+            return self._scan_user(repo, project_type, weight)
         elif perspective == "PRODUCT":
-            return self._scan_product(repo, project_type)
+            return self._scan_product(repo, project_type, weight)
         elif perspective == "PROJECT":
-            return self._scan_project(repo, project_type)
+            return self._scan_project(repo, project_type, weight)
         elif perspective == "TECH":
-            return self._scan_tech(repo, project_type)
+            return self._scan_tech(repo, project_type, weight)
         return []
 
-    def _scan_user(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+    def _scan_user(self, repo: Repository, project_type: str = "通用项目",
+                   weight: float = 0.25) -> list[PerspectiveFinding]:
         """
         👤 用户视角: Is it easy and pleasant to use?
         Uses project-standard's user/user-perspective.md as evaluation criteria.
+        v4.2: Weight-aware scanning + prior findings context.
         """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
             return []
         repo_path = repo.resolve_path()
         context = self._gather_context(repo)
-
-        # Load project-standard USER reference doc
         ref_doc = self._project_standard_docs.get("USER", "")
+
+        # Build weight-aware focus instruction
+        if weight >= 0.30:
+            focus = "此项目用户视角权重较高，请格外仔细检查用户体验问题，优先发现 CLI/交互/上手门槛问题。"
+        elif weight >= 0.20:
+            focus = "此项目用户视角权重中等，按标准检查即可。"
+        else:
+            focus = "此项目用户视角权重较低，可以简略检查，重点放在其他高权重视角。"
 
         prompt = (
             f"你收到了这条飞书消息：\n"
             f"\"你觉得 {repo_path.name} 这个工具好用吗？有什么用户体验不好的地方？\"\n\n"
-            f"【项目类型】{project_type}\n"
+            f"【项目类型】{project_type} | 用户视角权重: {weight:.0%}\n"
+            f"【重点提示】{focus}\n"
             f"【你的身份】\n{self.effective_persona}\n"
-            f"【上下文】\n{self.master_summary[:600]}\n"
+            f"【上下文】\n{self.master_summary[:500]}\n"
             f"【用户偏好】\n"
             f"  喜欢: {', '.join(self.hawk_prefs.get('liked', [])[:3]) or '(无)'}\n"
             f"  不喜欢: {', '.join(self.hawk_prefs.get('disliked', [])[:3]) or '(无)'}\n\n"
             f"【评判标准 - 用户视角】\n"
-            f"参考 project-standard 的标准进行评估：\n"
             f"{ref_doc[:3000] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
-            f"从用户视角分析，关注：\n"
+            f"从用户视角分析，重点关注：\n"
             f"  1. CLI 设计是否直观（参数名、默认值、help文案）\n"
             f"  2. 错误提示是否说人话\n"
             f"  3. 新人上手门槛（文档够吗？）\n"
@@ -3727,28 +4012,35 @@ class FourPerspectiveScanner:
                           model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
         return self._parse_llm_findings(result, "USER")
 
-    def _scan_product(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+    def _scan_product(self, repo: Repository, project_type: str = "通用项目",
+                      weight: float = 0.25) -> list[PerspectiveFinding]:
         """
         📦 产品视角: Does it actually solve what it claims to solve?
         Uses project-standard's product-requirements.md as evaluation criteria.
+        v4.2: Weight-aware scanning.
         """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
             return []
         repo_path = repo.resolve_path()
         context = self._gather_context(repo)
-
-        # Load project-standard PRODUCT reference doc
         ref_doc = self._project_standard_docs.get("PRODUCT", "")
+
+        if weight >= 0.30:
+            focus = "此项目产品视角权重最高，请仔细核查 README/SKILL.md 承诺是否兑现。"
+        elif weight >= 0.20:
+            focus = "此项目产品视角权重中等，按标准检查即可。"
+        else:
+            focus = "此项目产品视角权重较低，可以简略检查。"
 
         prompt = (
             f"你收到了这条飞书消息：\n"
             f"\"你觉得 {repo_path.name} 还有什么可以优化的地方？有什么不足？\"\n\n"
-            f"【项目类型】{project_type}\n"
+            f"【项目类型】{project_type} | 产品视角权重: {weight:.0%}\n"
+            f"【重点提示】{focus}\n"
             f"【你的身份】\n{self.effective_persona}\n"
-            f"【上下文】\n{self.master_summary[:600]}\n\n"
+            f"【上下文】\n{self.master_summary[:500]}\n\n"
             f"【评判标准 - 产品视角】\n"
-            f"参考 project-standard 的标准进行评估：\n"
             f"{ref_doc[:3000] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
             f"你要分析：这个项目声称解决什么问题？它真的解决了吗？\n\n"
             f"关注：\n"
@@ -3772,10 +4064,12 @@ class FourPerspectiveScanner:
                           model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
         return self._parse_llm_findings(result, "PRODUCT")
 
-    def _scan_project(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+    def _scan_project(self, repo: Repository, project_type: str = "通用项目",
+                     weight: float = 0.25) -> list[PerspectiveFinding]:
         """
         🏗 项目视角: Is the project运作得好？
         Uses project-standard's project-inspection.md as evaluation criteria.
+        v4.2: Weight-aware scanning.
         """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
@@ -3783,25 +4077,27 @@ class FourPerspectiveScanner:
         repo_path = repo.resolve_path()
         learnings = self.learnings
         iterations_dir = repo_path / ".iterations"
-
-        # Load project-standard PROJECT reference doc
         ref_doc = self._project_standard_docs.get("PROJECT", "")
 
-        # Check learnings history
+        if weight >= 0.25:
+            focus = "此项目项目视角权重较高，请仔细检查运作健康度、巡检节奏和依赖管理。"
+        else:
+            focus = "此项目项目视角权重较低，可以简略检查。"
+
         learnings_status = "无" if "No learnings" in learnings else f"有 {learnings.count(chr(10))} 条记录"
         iteration_count = len(list(iterations_dir.glob("*"))) if iterations_dir.exists() else 0
 
         prompt = (
             f"你收到了这条飞书消息：\n"
             f"\"你觉得 {repo_path.name} 这个项目在运作方式上有什么问题？\"\n\n"
-            f"【项目类型】{project_type}\n"
+            f"【项目类型】{project_type} | 项目视角权重: {weight:.0%}\n"
+            f"【重点提示】{focus}\n"
             f"【你的身份】\n{self.effective_persona}\n"
-            f"【上下文】\n{self.master_summary[:600]}\n"
+            f"【上下文】\n{self.master_summary[:400]}\n"
             f"【项目状态】\n"
             f"  learnings历史: {learnings_status}\n"
             f"  巡检迭代次数: {iteration_count}\n\n"
             f"【评判标准 - 项目视角】\n"
-            f"参考 project-standard 的标准进行评估：\n"
             f"{ref_doc[:3000] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
             f"从项目运作视角分析，关注：\n"
             f"  1. learnings有没有形成闭环（上一次发现的问题追踪了吗？）\n"
@@ -3860,12 +4156,13 @@ class FourPerspectiveScanner:
             ))
         return findings
 
-    def _scan_tech(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+    def _scan_tech(self, repo: Repository, project_type: str = "通用项目",
+                  weight: float = 0.25) -> list[PerspectiveFinding]:
         """
         ⚙️ 技术视角: Is the code healthy?
         Uses project-standard's code-standards.md as evaluation criteria.
 
-        v4.0: LLM-driven scan + project-type-aware checks (security + performance).
+        v4.2: LLM-driven scan + project-type-aware checks (security + performance) + weight-aware.
         """
         config = get_openclaw_llm_config()
         repo_path = repo.resolve_path()
@@ -5266,6 +5563,13 @@ def cmd_scan(args) -> int:
     product_findings = product_scanner.scan()
     print_product_findings(product_findings)
 
+    # v4.2: GitHub integration — post results as PR comment or issue
+    github_event = getattr(args, 'github_event', '') or ""
+    if github_event and product_findings:
+        for repo in repos:
+            repo_path = repo.resolve_path()
+            product_scanner.post_github_comment(repo_path, product_findings, github_event)
+
     # Build plan and report lines
     plan_lines, report_lines, pending_items = _build_plan_and_report(
         iteration_id, mode, dry_run, repos, duration,
@@ -6228,6 +6532,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     scan_p.add_argument(
         "--repo", type=str, default="",
         help="Scan only the specified repository path (default: all configured repos)"
+    )
+    scan_p.add_argument(
+        "--github-event", type=str, default="",
+        help="GitHub event type (pr_review, push, manual). When set, results are posted to GitHub."
     )
 
     # confirm
