@@ -1,38 +1,43 @@
 #!/usr/bin/env python3
 """
-Auto-Evolve v3.0 — Automated skill iteration manager.
+Auto-Evolve v3.1 — Automated skill iteration manager.
 
-Features (v2.2):
-- True OpenClaw cron integration (auto-creates cron jobs)
-- Value-based priority scoring (value/risk/cost formula)
-- Iteration metrics tracking (metrics.json per iteration)
-- PR batch merging (groups similar small changes)
-- Git conflict detection and auto-resolution
-- Approval reasons tracked in learnings
+Features (v3.1):
+- EffectTracker: true before/after effect tracking per iteration
+- CostTracker: LLM call cost tracking with pricing table
+- IssueLinker: auto-close GitHub issues related to committed changes
+- SmartScheduler: activity-based dynamic scan frequency
 
-Features (v2.1):
-- Two operation modes: semi-auto (default) and full-auto
-- Cron scheduling via OpenClaw cron API
-- Rejection/approval learning history
-- Privacy sanitization for closed repositories
-- Execution preview before applying changes
-- Alert generation on quality gate failure
+Features (v3.0):
+- LLM-driven code analysis
+- Dependency awareness
+- Test comparison
+- Cherry-pick rollback
+- Multi-language support
+- Release management
+- Contributor tracking
+- Priority scoring
 
 Usage:
     auto-evolve.py scan [--dry-run]
     auto-evolve.py approve [--all | ID...] [--reason TEXT]
     auto-evolve.py confirm                       # confirm pending changes (semi-auto)
-    auto-evolve.py reject <id> [--reason TEXT]   # reject a pending item
+    auto-evolve.py reject <id> [--reason TEXT]
     auto-evolve.py repo-add <path> --type TYPE [--monitor]
     auto-evolve.py repo-list
     auto-evolve.py rollback --to VERSION
     auto-evolve.py schedule --every HOURS
+    auto-evolve.py schedule --suggest
+    auto-evolve.py schedule --auto
     auto-evolve.py schedule --show
     auto-evolve.py schedule --remove
     auto-evolve.py set-mode semi-auto|full-auto
     auto-evolve.py set-rules [--low] [--medium] [--high]
     auto-evolve.py log [--limit N]
-    auto-evolve.py learnings                    # show learning history
+    auto-evolve.py learnings
+    auto-evolve.py release --version VERSION [--changelog TEXT]
+    auto-evolve.py effects [--iteration ID]
+    auto-evolve.py costs [--iteration ID]
 """
 
 from __future__ import annotations
@@ -63,7 +68,8 @@ ITERATIONS_DIR = SKILL_DIR / ".iterations"
 LEARNINGS_DIR = SKILL_DIR / ".learnings"
 
 REPO_TYPES = ("skill", "norms", "project", "closed")
-# Multi-language TODO patterns (v3.0)
+
+# Multi-language TODO patterns
 TODO_PATTERNS = {
     ".py": ["# TODO", "# FIXME", "# XXX", "# HACK", "# NOTE"],
     ".js": ["// TODO", "// FIXME", "// XXX", "// HACK", "/* TODO"],
@@ -84,14 +90,13 @@ RISK_COLORS = {
     "high": "🔴",
 }
 
-# Priority scoring weights (v2.2)
+# Priority scoring weights
 PRIORITY_WEIGHTS = {
     "value": 0.5,
     "risk": 0.3,
     "cost": 0.2,
 }
 
-# Value score defaults by change type
 DEFAULT_VALUE_SCORES = {
     "bug_fix": 10,
     "todo_fixme": 7,
@@ -103,7 +108,6 @@ DEFAULT_VALUE_SCORES = {
     "formatting": 3,
 }
 
-# Cost score defaults by estimated time
 DEFAULT_COST_SCORES = {
     "5min": 1,
     "15min": 3,
@@ -113,205 +117,19 @@ DEFAULT_COST_SCORES = {
 }
 
 
+# ===========================================================
+# LLM Pricing (v3.1 CostTracker)
+# ===========================================================
 
+LLM_PRICING: dict[str, dict[str, float]] = {
+    "MiniMax-M2": {"input": 0.1, "output": 0.3},
+    "gpt-4": {"input": 30.0, "output": 60.0},
+    "gpt-4o": {"input": 2.5, "output": 10.0},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.6},
+    "claude-3-5-sonnet": {"input": 3.0, "output": 15.0},
+    "claude-3-opus": {"input": 15.0, "output": 75.0},
+}
 
-# ===== LLM INTEGRATION (v3.0) =====
-
-def get_openclaw_llm_config():
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("MINIMAX_API_KEY", "")
-    base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("MINIMAX_BASE_URL", "")
-    model = os.environ.get("OPENAI_MODEL") or "MiniMax-M2"
-    try:
-        result = subprocess.run(["openclaw", "config", "get", "llm"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            config = json.loads(result.stdout)
-            api_key = api_key or config.get("api_key", "")
-            base_url = base_url or config.get("base_url", "")
-            model = model or config.get("model", "MiniMax-M2")
-    except: pass
-    return {"api_key": api_key, "base_url": base_url, "model": model}
-
-def call_llm(prompt, system="", model="", base_url="", api_key=""):
-    if not api_key or not base_url: return ""
-    import urllib.request
-    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
-    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
-    body = json.dumps({"model": model or "MiniMax-M2", "messages": messages, "temperature": 0.3}).encode("utf-8")
-    try:
-        req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    except: return ""
-
-def analyze_with_llm(code_snippet, context, repo_path=""):
-    config = get_openclaw_llm_config()
-    if not config["api_key"] or not config["base_url"]:
-        return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
-    lang = detect_language_from_path(repo_path)
-    system = "You are a senior code reviewer. Return valid JSON with keys: suggestion, risk_level, implementation_hint. Only JSON."
-    prompt = "Context: " + context + "\n\nCode:\n```" + lang + "\n" + code_snippet[:2000] + "\n```"
-    result = call_llm(prompt=prompt, system=system, model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
-    if not result:
-        return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
-    try:
-        parsed = json.loads(result)
-        parsed["available"] = True
-        return parsed
-    except json.JSONDecodeError:
-        m = re.search(r'\{[^{}]*\}', result, re.DOTALL)
-        if m:
-            try:
-                parsed = json.loads(m.group())
-                parsed["available"] = True
-                return parsed
-            except: pass
-        return {"suggestion": result.strip()[:200], "risk_level": "medium", "implementation_hint": "", "available": True}
-
-# ===== MULTI-LANGUAGE SUPPORT (v3.0) =====
-
-def detect_language_from_path(path):
-    return LANGUAGE_EXTENSIONS.get(Path(path).suffix.lower(), "text")
-
-def detect_repo_languages(repo_path):
-    langs = set()
-    for ext in LANGUAGE_EXTENSIONS:
-        if any(repo_path.rglob("*" + ext)): langs.add(ext)
-    return langs
-
-def get_todo_patterns_for_file(file_path):
-    return TODO_PATTERNS.get(Path(file_path).suffix.lower(), ["# TODO"])
-
-def scan_todos_multilang(repo):
-    findings = []
-    repo_path = repo.resolve_path()
-    for pattern in ["**/*" + ext for ext in LANGUAGE_EXTENSIONS] + ["**/*.md"]:
-        for file_path in repo_path.glob(pattern):
-            if any(s in str(file_path) for s in (".git", "__pycache__", "node_modules", ".iterations")): continue
-            try: content = file_path.read_text(encoding="utf-8")
-            except: continue
-            ext = file_path.suffix.lower()
-            lang_pats = TODO_PATTERNS.get(ext, ["# TODO"])
-            for i, line in enumerate(content.split("\n"), 1):
-                for pat in lang_pats:
-                    if pat in line:
-                        idx = line.find(pat)
-                        findings.append(OptimizationFinding(type="todo_fixme", file_path=str(file_path.relative_to(repo_path)), line=i, description="Unresolved: " + line[idx:].strip()[:80], suggestion="Address or document this annotation", risk=RiskLevel.LOW))
-                        break
-    return findings
-
-# ===== DEPENDENCY ANALYSIS (v3.0) =====
-
-def extract_imports(content, file_path):
-    ext = Path(file_path).suffix.lower()
-    imports = []
-    if ext == ".py":
-        for m in re.finditer(r"^(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", content, re.MULTILINE):
-            imports.append((m.group(1) or m.group(2)).split(".")[0])
-    elif ext in (".js", ".ts"):
-        for m in re.finditer(r"(?:require\s*\(\s*[\"\']([^\"\']+)[\"\']\s*\)|import\s+.*?\s+from\s+[\"\']([^\"\']+)[\"\'])", content):
-            imp = m.group(1) or m.group(2)
-            if imp and not imp.startswith("."): imports.append(imp.split("/")[0])
-    elif ext == ".go":
-        for m in re.finditer(r'import\s+"([^"]+)"', content):
-            imports.append(m.group(1).split("/")[-1])
-    elif ext == ".java":
-        for m in re.finditer(r"import\s+([\w.]+);", content):
-            imports.append(m.group(1).split(".")[-1])
-    return imports
-
-def build_dependency_map(repo_path):
-    dep_map = {}
-    for ext in LANGUAGE_EXTENSIONS:
-        for fp in repo_path.rglob("*" + ext):
-            if any(s in str(fp) for s in (".git", "__pycache__", "node_modules")): continue
-            try: dep_map[str(fp.relative_to(repo_path))] = extract_imports(fp.read_text(encoding="utf-8"), str(fp))
-            except: pass
-    return dep_map
-
-def find_dependents(target_file, dep_map):
-    target_base = Path(target_file).stem
-    return [fp for fp, imps in dep_map.items() if target_base in imps]
-
-def analyze_dependencies(repo, changed_files):
-    repo_path = repo.resolve_path()
-    dep_map = build_dependency_map(repo_path)
-    affected = {}
-    for changed in changed_files:
-        deps = find_dependents(changed, dep_map)
-        if deps: affected[changed] = deps
-    return affected
-
-# ===== TEST COMPARISON (v3.0) =====
-
-def run_tests_for_hash(repo, ref):
-    repo_path = str(repo.resolve_path())
-    if subprocess.run(["which", "pytest"], capture_output=True).returncode != 0:
-        return {"passed": None, "coverage": None, "duration": 0.0, "error": "pytest not found"}
-    subprocess.run(["git", "stash", "-q"], cwd=repo_path)
-    try:
-        subprocess.run(["git", "checkout", "-q", ref], cwd=repo_path)
-        start = time.time()
-        r = subprocess.run(["pytest", "--tb=short", "-q"], cwd=repo_path, capture_output=True, text=True, timeout=120)
-        dur = time.time() - start
-        passed = r.returncode == 0
-        cov = None
-        cr = Path(repo_path) / "coverage.xml"
-        if cr.exists():
-            txt = cr.read_text()
-            m = re.search(r'line-rate="([0-9.]+)"', txt)
-            if m: cov = float(m.group(1)) * 100
-        return {"passed": passed, "coverage": cov, "duration": dur, "error": None}
-    except subprocess.TimeoutExpired:
-        return {"passed": False, "coverage": None, "duration": 120.0, "error": "timeout"}
-    except Exception as e:
-        return {"passed": False, "coverage": None, "duration": 0.0, "error": str(e)}
-    finally:
-        subprocess.run(["git", "checkout", "-q", "-"], cwd=repo_path)
-        subprocess.run(["git", "stash", "pop", "-q"], cwd=repo_path)
-
-def run_test_comparison(repo, before_hash, after_hash):
-    before = run_tests_for_hash(repo, before_hash)
-    after = run_tests_for_hash(repo, after_hash)
-    delta = None
-    if before.get("coverage") is not None and after.get("coverage") is not None:
-        delta = round(after["coverage"] - before["coverage"], 2)
-    return {"before_coverage": before.get("coverage"), "after_coverage": after.get("coverage"), "delta": delta, "before_passed": before.get("passed"), "after_passed": after.get("passed"), "before_duration": before.get("duration", 0.0), "after_duration": after.get("duration", 0.0), "tests_passed": after.get("passed", False)}
-
-# ===== CONTRIBUTOR TRACKING (v3.0) =====
-
-def track_contributors(repo):
-    r = subprocess.run(["git", "log", "--pretty=format:%H|%s|%ad", "--date=iso"], cwd=str(repo.resolve_path()), capture_output=True, text=True, timeout=10)
-    total = auto_count = manual_count = 0
-    last_manual = None
-    for line in r.stdout.strip().split("\n"):
-        if not line: continue
-        total += 1
-        parts = line.split("|", 2)
-        if len(parts) < 2: continue
-        msg, date = parts[1], parts[2] if len(parts) > 2 else ""
-        if msg.startswith("auto:") or msg.startswith("auto-evolve:"): auto_count += 1
-        else:
-            manual_count += 1
-            if date and (last_manual is None or date > last_manual): last_manual = date.split()[0]
-    return {"total_commits": total, "auto_commits": auto_count, "manual_commits": manual_count, "auto_percentage": round((auto_count / total) * 100, 1) if total else 0.0, "last_manual_commit": last_manual}
-
-# ===== RELEASE MANAGEMENT (v3.0) =====
-
-def create_release(repo, version, changelog=""):
-    repo_path = repo.resolve_path()
-    tag = "v" + version.lstrip("v")
-    subprocess.run(["git", "tag", tag, "-m", "Release " + version.lstrip("v")], cwd=str(repo_path), check=True)
-    subprocess.run(["git", "push", "origin", tag], cwd=str(repo_path), check=True)
-    r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(repo_path), capture_output=True, text=True)
-    m = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", r.stdout.strip())
-    if not m:
-        print("Tag " + tag + " created and pushed."); return
-    slug = m.group(1)
-    notes = "# Release " + version.lstrip("v") + "\n\n" + changelog + "\n\n## auto-evolve\nManaged by auto-evolve.\n"
-    gr = subprocess.run(["gh", "release", "create", tag, "--title", tag, "--notes", notes, "--repo", slug], cwd=str(repo_path), capture_output=True, text=True)
-    if gr.returncode == 0: print("Release " + tag + " created: " + gr.stdout.strip())
-    else: print("Tag " + tag + " created. gh failed: " + gr.stderr.strip())
 
 # ===========================================================
 # Enums
@@ -345,6 +163,7 @@ class Repository:
     visibility: str = "public"
     auto_monitor: bool = True
     risk_override: Optional[str] = None
+    scan_interval_hours: int = 168  # v3.1 SmartScheduler
 
     def resolve_path(self) -> Path:
         return Path(self.path).expanduser().resolve()
@@ -390,12 +209,10 @@ class ChangeItem:
     commit_hash: Optional[str] = None
     pr_url: Optional[str] = None
     content_hash: Optional[str] = None
-    # v3.0: Priority scoring fields
     value_score: int = 5
     risk_score: int = 5
     cost_score: int = 5
     priority: float = 0.0
-    # v3.0
     llm_suggestion: Optional[str] = None
     llm_risk: Optional[str] = None
     llm_implementation_hint: Optional[str] = None
@@ -427,11 +244,12 @@ class IterationManifest:
     rollback_of: Optional[str] = None
     rollback_reason: Optional[str] = None
     has_alert: bool = False
-    # v3.0: Metrics reference
     metrics_id: Optional[str] = None
-    # v3.0
     test_coverage_delta: Optional[float] = None
     contributors: Optional[dict] = None
+    # v3.1
+    total_cost_usd: Optional[float] = None
+    llm_calls: int = 0
 
 
 @dataclass
@@ -443,7 +261,6 @@ class LearningEntry:
     reason: Optional[str]
     date: str
     repo: str
-    # v3.0: Approval reason tracking
     approved_by: Optional[str] = None
 
 
@@ -456,7 +273,6 @@ class AlertEntry:
     details: dict
 
 
-# v3.0: Metrics model
 @dataclass
 class IterationMetrics:
     iteration_id: str
@@ -471,7 +287,831 @@ class IterationMetrics:
 
 
 # ===========================================================
-# Priority Calculation (v2.2)
+# v3.1: EffectTracker
+# ===========================================================
+
+class EffectTracker:
+    """
+    Tracks the actual effects of each iteration by comparing
+    code quality metrics before and after changes are applied.
+    """
+
+    def __init__(self, iterations_dir: Path = ITERATIONS_DIR) -> None:
+        self.iterations_dir = iterations_dir
+
+    def count_todos(self, repo_path: Path) -> int:
+        """Count unresolved TODO/FIXME annotations across the repo."""
+        count = 0
+        for ext, patterns in TODO_PATTERNS.items():
+            if ext == ".md":
+                continue  # Skip markdown separately
+            for code_file in repo_path.rglob(f"*{ext}"):
+                if any(s in str(code_file) for s in (".git", "__pycache__", "node_modules", ".iterations")):
+                    continue
+                try:
+                    content = code_file.read_text(encoding="utf-8")
+                    for line in content.split("\n"):
+                        for pat in patterns:
+                            if pat in line:
+                                count += 1
+                                break
+                except (UnicodeDecodeError, OSError):
+                    pass
+        # Also scan markdown TODO markers
+        for md_file in repo_path.rglob("*.md"):
+            if ".git" in str(md_file) or ".iterations" in str(md_file):
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                for line in content.split("\n"):
+                    for pat in TODO_PATTERNS[".md"]:
+                        if pat in line:
+                            count += 1
+                            break
+            except (UnicodeDecodeError, OSError):
+                pass
+        return count
+
+    def count_code_lines(self, repo_path: Path) -> int:
+        """Count non-blank, non-comment lines of code."""
+        total = 0
+        for ext in LANGUAGE_EXTENSIONS:
+            for code_file in repo_path.rglob(f"*{ext}"):
+                if any(s in str(code_file) for s in (".git", "__pycache__", "node_modules", ".iterations")):
+                    continue
+                try:
+                    content = code_file.read_text(encoding="utf-8")
+                    for line in content.split("\n"):
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
+                            total += 1
+                except (UnicodeDecodeError, OSError):
+                    pass
+        return total
+
+    def count_functions(self, repo_path: Path) -> int:
+        """Count function/ method definitions in Python files."""
+        count = 0
+        for py_file in repo_path.rglob("*.py"):
+            if any(s in str(py_file) for s in (".git", "__pycache__", ".iterations")):
+                continue
+            try:
+                content = py_file.read_text(encoding="utf-8")
+                count += len(re.findall(r"^(?:async\s+)?def\s+\w+", content, re.MULTILINE))
+            except (UnicodeDecodeError, OSError):
+                pass
+        return count
+
+    def count_duplicate_lines(self, repo_path: Path) -> int:
+        """Estimate duplicate code lines (identical lines appearing 3+ times)."""
+        line_counts: dict[str, int] = {}
+        for ext in LANGUAGE_EXTENSIONS:
+            for code_file in repo_path.rglob(f"*{ext}"):
+                if any(s in str(code_file) for s in (".git", "__pycache__", ".iterations")):
+                    continue
+                try:
+                    content = code_file.read_text(encoding="utf-8")
+                    for line in content.split("\n"):
+                        stripped = line.strip()
+                        if len(stripped) > 20 and not stripped.startswith("#") and not stripped.startswith("//"):
+                            line_counts[stripped] = line_counts.get(stripped, 0) + 1
+                except (UnicodeDecodeError, OSError):
+                    pass
+        return sum(1 for c in line_counts.values() if c >= 3)
+
+    def run_lint(self, repo_path: Path) -> int:
+        """Run pylint on Python files and return error count."""
+        result = subprocess.run(
+            ["python3", "-m", "py_compile"],
+            cwd=str(repo_path),
+            capture_output=True,
+        )
+        # Simple syntax check only - pylint may not be installed
+        return 0  # Placeholder; real lint count requires pylint
+
+    def snapshot(self, repo_path: Path) -> dict:
+        """
+        Take a snapshot of current code quality metrics.
+        Returns a dict with todos, code_lines, functions, duplicates.
+        """
+        return {
+            "todos": self.count_todos(repo_path),
+            "code_lines": self.count_code_lines(repo_path),
+            "functions": self.count_functions(repo_path),
+            "duplicate_lines": self.count_duplicate_lines(repo_path),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def track_iteration_effect(
+        self,
+        iteration_id: str,
+        before_snapshots: dict[str, dict],
+        after_snapshots: dict[str, dict],
+        todos_resolved: int = 0,
+        lint_errors_fixed: int = 0,
+        coverage_delta: float = 0.0,
+    ) -> dict:
+        """
+        Compare before/after snapshots and produce an effect report.
+        Stores the result as effect.json in the iteration directory.
+        """
+        effects: dict[str, dict] = {}
+
+        all_repos = set(before_snapshots.keys()) | set(after_snapshots.keys())
+
+        for repo_key in all_repos:
+            before = before_snapshots.get(repo_key, {})
+            after = after_snapshots.get(repo_key, {})
+
+            effects[repo_key] = {
+                "todos_delta": (after.get("todos", 0) - before.get("todos", 0)),
+                "code_lines_delta": (after.get("code_lines", 0) - before.get("code_lines", 0)),
+                "functions_delta": (after.get("functions", 0) - before.get("functions", 0)),
+                "duplicate_lines_delta": (after.get("duplicate_lines", 0) - before.get("duplicate_lines", 0)),
+            }
+
+        # Aggregate deltas across all repos
+        total_todos_delta = sum(e["todos_delta"] for e in effects.values())
+        total_code_lines_delta = sum(e["code_lines_delta"] for e in effects.values())
+        total_functions_delta = sum(e["functions_delta"] for e in effects.values())
+        total_duplicate_delta = sum(e["duplicate_lines_delta"] for e in effects.values())
+
+        # Determine verdict
+        positive_signals = sum(1 for d in [
+            -total_todos_delta,  # Fewer TODOs = good
+            coverage_delta,
+            -total_duplicate_delta,  # Fewer duplicates = good
+            -abs(total_functions_delta),  # Fewer long functions = good
+        ] if d > 0)
+        negative_signals = sum(1 for d in [
+            -total_todos_delta,
+            coverage_delta,
+            -total_duplicate_delta,
+            -abs(total_functions_delta),
+        ] if d < 0)
+
+        if positive_signals >= 3:
+            verdict = "positive"
+        elif negative_signals >= 3:
+            verdict = "negative"
+        else:
+            verdict = "neutral"
+
+        summary_parts = []
+        if total_todos_delta != 0:
+            summary_parts.append(f"{abs(total_todos_delta)} TODOs {'resolved' if total_todos_delta < 0 else 'added'}")
+        if coverage_delta != 0:
+            summary_parts.append(f"coverage {coverage_delta:+.1f}%")
+        if total_duplicate_delta != 0:
+            summary_parts.append(f"{abs(total_duplicate_delta)} duplicate lines {'removed' if total_duplicate_delta < 0 else 'added'}")
+        if total_code_lines_delta != 0:
+            summary_parts.append(f"{total_code_lines_delta:+,} lines of code")
+
+        summary = ", ".join(summary_parts) if summary_parts else "No significant changes detected"
+
+        effect_report = {
+            "iteration_id": iteration_id,
+            "date": datetime.now(timezone.utc).isoformat(),
+            "effects": effects,
+            "summary": summary,
+            "verdict": verdict,
+            "totals": {
+                "todos_resolved": todos_resolved,
+                "todos_delta": total_todos_delta,
+                "coverage_delta": coverage_delta,
+                "lint_errors_delta": -lint_errors_fixed if lint_errors_fixed else 0,
+                "duplicate_lines_delta": total_duplicate_delta,
+                "function_count_delta": total_functions_delta,
+                "code_lines_delta": total_code_lines_delta,
+            },
+        }
+
+        # Save to iteration directory
+        iter_dir = self.iterations_dir / iteration_id
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        (iter_dir / "effect.json").write_text(json.dumps(effect_report, indent=2))
+
+        return effect_report
+
+
+# ===========================================================
+# v3.1: CostTracker
+# ===========================================================
+
+class CostTracker:
+    """
+    Tracks LLM call costs per iteration using a pricing table.
+    Records each call and aggregates costs in catalog.json.
+    """
+
+    def __init__(self, iterations_dir: Path = ITERATIONS_DIR) -> None:
+        self.iterations_dir = iterations_dir
+        self.pricing = LLM_PRICING
+
+    def track_llm_call(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        model: str,
+    ) -> dict:
+        """
+        Record a single LLM call and estimate its cost in USD.
+        Saves the call record to the current iteration's llm_calls.jsonl.
+        """
+        pricing = self.pricing.get(model, {"input": 0.0, "output": 0.0})
+        input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
+        output_cost = (completion_tokens / 1_000_000) * pricing["output"]
+        total_cost = round(input_cost + output_cost, 6)
+
+        record = {
+            "date": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "estimated_cost_usd": total_cost,
+        }
+
+        # Append to current iteration's calls file (session-scoped)
+        if not hasattr(self, "_pending_calls"):
+            self._pending_calls: list[dict] = []
+        self._pending_calls.append(record)
+
+        return record
+
+    def flush_calls(self, iteration_id: str) -> None:
+        """Write accumulated calls to the iteration directory."""
+        if not hasattr(self, "_pending_calls") or not self._pending_calls:
+            return
+        iter_dir = self.iterations_dir / iteration_id
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        calls_file = iter_dir / "llm_calls.jsonl"
+        with calls_file.open("a") as f:
+            for call in self._pending_calls:
+                f.write(json.dumps(call) + "\n")
+        self._pending_calls = []
+
+    def get_iteration_cost(self, iteration_id: str) -> dict:
+        """Aggregate all LLM costs for a given iteration."""
+        calls = self.load_calls(iteration_id)
+        total = sum(c["estimated_cost_usd"] for c in calls)
+        total_tokens = sum(c["total_tokens"] for c in calls)
+        return {
+            "iteration_id": iteration_id,
+            "total_calls": len(calls),
+            "total_tokens": total_tokens,
+            "total_cost_usd": round(total, 6),
+        }
+
+    def load_calls(self, iteration_id: str) -> list[dict]:
+        """Load all LLM call records for an iteration."""
+        calls_file = self.iterations_dir / iteration_id / "llm_calls.jsonl"
+        if not calls_file.exists():
+            return []
+        calls = []
+        with calls_file.open() as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        calls.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return calls
+
+
+# ===========================================================
+# v3.1: IssueLinker
+# ===========================================================
+
+class IssueLinker:
+    """
+    Finds and auto-closes GitHub Issues related to committed changes.
+    Uses `gh issue list` to find open issues referencing changed files.
+    """
+
+    def __init__(self) -> None:
+        self._gh_available: Optional[bool] = None
+
+    def _check_gh(self) -> bool:
+        """Check if gh CLI is available."""
+        if self._gh_available is None:
+            self._gh_available = subprocess.run(
+                ["which", "gh"], capture_output=True
+            ).returncode == 0
+        return self._gh_available
+
+    def find_related_issues(self, repo_path: Path, changed_files: list[str]) -> list[dict]:
+        """
+        Find open issues whose title or body references any of the changed files.
+        """
+        if not self._check_gh():
+            return []
+
+        result = subprocess.run(
+            ["gh", "issue", "list", "--state", "open", "--limit", "50", "--json", "number,title,body"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+
+        try:
+            issues = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return []
+
+        related = []
+        for issue in issues:
+            body = issue.get("body", "") or ""
+            title = issue.get("title", "") or ""
+            combined = title.lower() + " " + body.lower()
+            for file_path in changed_files:
+                file_lower = file_path.lower()
+                # Match file name or path component
+                if file_lower in combined or Path(file_lower).name in combined:
+                    related.append({
+                        "number": issue["number"],
+                        "title": issue["title"],
+                        "body": body[:200],
+                    })
+                    break
+
+        return related
+
+    def close_issue(self, repo_path: Path, issue_number: int, comment: str) -> bool:
+        """
+        Add a comment to an issue explaining it was resolved by auto-evolve,
+        then close it with reason 'completed'.
+        """
+        if not self._check_gh():
+            return False
+
+        # Add comment
+        subprocess.run(
+            [
+                "gh", "issue", "comment", str(issue_number),
+                "--body", comment,
+            ],
+            cwd=str(repo_path),
+            capture_output=True,
+        )
+
+        # Close issue
+        result = subprocess.run(
+            [
+                "gh", "issue", "close", str(issue_number),
+                "--reason", "completed",
+            ],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    def close_related_issues(self, repo_path: Path, changed_files: list[str], iteration_id: str) -> dict:
+        """
+        Find and close all issues related to changed files.
+        Returns a summary dict.
+        """
+        related = self.find_related_issues(repo_path, changed_files)
+        if not related:
+            return {"found": 0, "closed": 0, "issues": []}
+
+        closed = []
+        for issue in related:
+            comment = (
+                f"**Resolved by auto-evolve** (iteration `{iteration_id}`)\n\n"
+                f"This issue was automatically resolved after the related "
+                f"code changes were applied and validated."
+            )
+            success = self.close_issue(repo_path, issue["number"], comment)
+            closed.append({
+                "number": issue["number"],
+                "title": issue["title"],
+                "closed": success,
+            })
+
+        return {
+            "found": len(related),
+            "closed": sum(1 for c in closed if c["closed"]),
+            "issues": closed,
+        }
+
+
+# ===========================================================
+# v3.1: SmartScheduler
+# ===========================================================
+
+class SmartScheduler:
+    """
+    Dynamically adjusts scan frequency based on project activity.
+    Uses git commit frequency over the last 7 days to assess activity level.
+    """
+
+    ACTIVITY_THRESHOLDS: dict[str, dict[str, int]] = {
+        "very_active": {"commits_per_week": 20, "scan_interval_hours": 24},
+        "active": {"commits_per_week": 10, "scan_interval_hours": 72},
+        "normal": {"commits_per_week": 3, "scan_interval_hours": 168},
+        "idle": {"commits_per_week": 0, "scan_interval_hours": 336},
+    }
+
+    def __init__(self, config: Optional[dict] = None) -> None:
+        self.config = config or {}
+
+    def assess_activity(self, repo_path: Path) -> str:
+        """
+        Count commits in the last 7 days and return activity level.
+        Returns one of: very_active, active, normal, idle
+        """
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--since", "7 days ago"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
+        commit_count = len([l for l in lines if l])
+
+        if commit_count >= self.ACTIVITY_THRESHOLDS["very_active"]["commits_per_week"]:
+            return "very_active"
+        elif commit_count >= self.ACTIVITY_THRESHOLDS["active"]["commits_per_week"]:
+            return "active"
+        elif commit_count >= self.ACTIVITY_THRESHOLDS["normal"]["commits_per_week"]:
+            return "normal"
+        else:
+            return "idle"
+
+    def get_recommended_interval(self, repo_path: Path) -> int:
+        """Get the recommended scan interval for a repo based on its activity."""
+        activity = self.assess_activity(repo_path)
+        return self.ACTIVITY_THRESHOLDS[activity]["scan_interval_hours"]
+
+    def get_activity_stats(self, repo_path: Path) -> dict:
+        """Get detailed activity statistics for a repo."""
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--since", "7 days ago"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
+        commit_count = len([l for l in lines if l])
+
+        activity = self.assess_activity(repo_path)
+        recommended = self.ACTIVITY_THRESHOLDS[activity]["scan_interval_hours"]
+
+        return {
+            "commits_last_7_days": commit_count,
+            "activity": activity,
+            "recommended_interval_hours": recommended,
+            "threshold": self.ACTIVITY_THRESHOLDS[activity]["commits_per_week"],
+        }
+
+    def suggest_schedule(self) -> dict:
+        """
+        Generate scheduling suggestions for all configured repositories.
+        Returns a dict mapping repo name to suggestion details.
+        """
+        suggestions = {}
+        repositories = self.config.get("repositories", [])
+
+        for repo in repositories:
+            repo_path = Path(repo["path"]).expanduser().resolve()
+            if not repo_path.exists():
+                continue
+
+            stats = self.get_activity_stats(repo_path)
+            current_interval = repo.get("scan_interval_hours", 168)
+
+            delta = stats["recommended_interval_hours"] - current_interval
+            if delta > 0:
+                action = "increase"
+            elif delta < 0:
+                action = "decrease"
+            else:
+                action = "maintain"
+
+            suggestions[repo["path"]] = {
+                "name": repo_path.name,
+                "current_interval_hours": current_interval,
+                "recommended_interval_hours": stats["recommended_interval_hours"],
+                "activity": stats["activity"],
+                "commits_last_7_days": stats["commits_last_7_days"],
+                "action": action,
+                "change_hours": delta,
+            }
+
+        return suggestions
+
+    def apply_schedule(self, updates: dict[str, int]) -> dict:
+        """
+        Apply interval changes to config and save.
+        updates: dict mapping repo path -> new interval hours
+        Returns a summary dict.
+        """
+        from auto_evolve import load_config, save_config
+        config = load_config()
+        applied = []
+
+        for repo in config.get("repositories", []):
+            path = repo["path"]
+            if path in updates:
+                old = repo.get("scan_interval_hours", 168)
+                repo["scan_interval_hours"] = updates[path]
+                applied.append({
+                    "path": path,
+                    "old_interval": old,
+                    "new_interval": updates[path],
+                })
+
+        save_config(config)
+        return {"applied": applied}
+
+
+# ===========================================================
+# LLM Integration
+# ===========================================================
+
+def get_openclaw_llm_config() -> dict:
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("MINIMAX_API_KEY", "")
+    base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("MINIMAX_BASE_URL", "")
+    model = os.environ.get("OPENAI_MODEL") or "MiniMax-M2"
+    try:
+        result = subprocess.run(["openclaw", "config", "get", "llm"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            cfg = json.loads(result.stdout)
+            api_key = api_key or cfg.get("api_key", "")
+            base_url = base_url or cfg.get("base_url", "")
+            model = model or cfg.get("model", "MiniMax-M2")
+    except Exception:
+        pass
+    return {"api_key": api_key, "base_url": base_url, "model": model}
+
+
+def call_llm(prompt: str, system: str = "", model: str = "", base_url: str = "", api_key: str = "") -> str:
+    if not api_key or not base_url:
+        return ""
+    import urllib.request
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
+    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+    body = json.dumps({"model": model or "MiniMax-M2", "messages": messages, "temperature": 0.3}).encode("utf-8")
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception:
+        return ""
+
+
+def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> dict:
+    config = get_openclaw_llm_config()
+    if not config["api_key"] or not config["base_url"]:
+        return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
+    lang = detect_language_from_path(repo_path)
+    system = "You are a senior code reviewer. Return valid JSON with keys: suggestion, risk_level, implementation_hint. Only JSON."
+    prompt = "Context: " + context + "\n\nCode:\n```" + lang + "\n" + code_snippet[:2000] + "\n```"
+    result = call_llm(prompt=prompt, system=system, model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+    if not result:
+        return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
+    try:
+        parsed = json.loads(result)
+        parsed["available"] = True
+        return parsed
+    except json.JSONDecodeError:
+        m = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group())
+                parsed["available"] = True
+                return parsed
+            except Exception:
+                pass
+        return {"suggestion": result.strip()[:200], "risk_level": "medium", "implementation_hint": "", "available": True}
+
+
+# ===========================================================
+# Multi-Language Support
+# ===========================================================
+
+def detect_language_from_path(path: str) -> str:
+    return LANGUAGE_EXTENSIONS.get(Path(path).suffix.lower(), "text")
+
+
+def detect_repo_languages(repo_path: Path) -> set[str]:
+    langs: set[str] = set()
+    for ext in LANGUAGE_EXTENSIONS:
+        if any(repo_path.rglob("*" + ext)):
+            langs.add(ext)
+    return langs
+
+
+def get_todo_patterns_for_file(file_path: str) -> list[str]:
+    return TODO_PATTERNS.get(Path(file_path).suffix.lower(), ["# TODO"])
+
+
+def scan_todos_multilang(repo: Repository) -> list[OptimizationFinding]:
+    findings = []
+    repo_path = repo.resolve_path()
+    for ext in LANGUAGE_EXTENSIONS:
+        for file_path in repo_path.rglob("*" + ext):
+            if any(s in str(file_path) for s in (".git", "__pycache__", "node_modules", ".iterations")):
+                continue
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            lang_pats = TODO_PATTERNS.get(ext, ["# TODO"])
+            for i, line in enumerate(content.split("\n"), 1):
+                for pat in lang_pats:
+                    if pat in line:
+                        idx = line.find(pat)
+                        findings.append(OptimizationFinding(
+                            type="todo_fixme",
+                            file_path=str(file_path.relative_to(repo_path)),
+                            line=i,
+                            description="Unresolved: " + line[idx:].strip()[:80],
+                            suggestion="Address or document this annotation",
+                            risk=RiskLevel.LOW,
+                        ))
+                        break
+    return findings
+
+
+# ===========================================================
+# Dependency Analysis
+# ===========================================================
+
+def extract_imports(content: str, file_path: str) -> list[str]:
+    ext = Path(file_path).suffix.lower()
+    imports: list[str] = []
+    if ext == ".py":
+        for m in re.finditer(r"^(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", content, re.MULTILINE):
+            imports.append((m.group(1) or m.group(2)).split(".")[0])
+    elif ext in (".js", ".ts"):
+        for m in re.finditer(r"(?:require\s*\(\s*[\"']([^\"']+)[\"']\s*\)|import\s+.*?\s+from\s+[\"']([^\"']+)[\"'])", content):
+            imp = m.group(1) or m.group(2)
+            if imp and not imp.startswith("."):
+                imports.append(imp.split("/")[0])
+    elif ext == ".go":
+        for m in re.finditer(r'import\s+"([^"]+)"', content):
+            imports.append(m.group(1).split("/")[-1])
+    elif ext == ".java":
+        for m in re.finditer(r"import\s+([\w.]+);", content):
+            imports.append(m.group(1).split(".")[-1])
+    return imports
+
+
+def build_dependency_map(repo_path: Path) -> dict[str, list[str]]:
+    dep_map: dict[str, list[str]] = {}
+    for ext in LANGUAGE_EXTENSIONS:
+        for fp in repo_path.rglob("*" + ext):
+            if any(s in str(fp) for s in (".git", "__pycache__", "node_modules")):
+                continue
+            try:
+                dep_map[str(fp.relative_to(repo_path))] = extract_imports(
+                    fp.read_text(encoding="utf-8"), str(fp)
+                )
+            except (UnicodeDecodeError, OSError):
+                pass
+    return dep_map
+
+
+def find_dependents(target_file: str, dep_map: dict[str, list[str]]) -> list[str]:
+    target_base = Path(target_file).stem
+    return [fp for fp, imps in dep_map.items() if target_base in imps]
+
+
+def analyze_dependencies(repo: Repository, changed_files: list[str]) -> dict[str, list[str]]:
+    repo_path = repo.resolve_path()
+    dep_map = build_dependency_map(repo_path)
+    affected: dict[str, list[str]] = {}
+    for changed in changed_files:
+        deps = find_dependents(changed, dep_map)
+        if deps:
+            affected[changed] = deps
+    return affected
+
+
+# ===========================================================
+# Test Comparison
+# ===========================================================
+
+def run_tests_for_hash(repo: Repository, ref: str) -> dict:
+    repo_path = str(repo.resolve_path())
+    if subprocess.run(["which", "pytest"], capture_output=True).returncode != 0:
+        return {"passed": None, "coverage": None, "duration": 0.0, "error": "pytest not found"}
+    subprocess.run(["git", "stash", "-q"], cwd=repo_path)
+    try:
+        subprocess.run(["git", "checkout", "-q", ref], cwd=repo_path)
+        start = time.time()
+        r = subprocess.run(["pytest", "--tb=short", "-q"], cwd=repo_path, capture_output=True, text=True, timeout=120)
+        dur = time.time() - start
+        passed = r.returncode == 0
+        cov = None
+        cr = Path(repo_path) / "coverage.xml"
+        if cr.exists():
+            txt = cr.read_text()
+            m = re.search(r'line-rate="([0-9.]+)"', txt)
+            if m:
+                cov = float(m.group(1)) * 100
+        return {"passed": passed, "coverage": cov, "duration": dur, "error": None}
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "coverage": None, "duration": 120.0, "error": "timeout"}
+    except Exception as e:
+        return {"passed": False, "coverage": None, "duration": 0.0, "error": str(e)}
+    finally:
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=repo_path)
+        subprocess.run(["git", "stash", "pop", "-q"], cwd=repo_path)
+
+
+def run_test_comparison(repo: Repository, before_hash: str, after_hash: str) -> dict:
+    before = run_tests_for_hash(repo, before_hash)
+    after = run_tests_for_hash(repo, after_hash)
+    delta = None
+    if before.get("coverage") is not None and after.get("coverage") is not None:
+        delta = round(after["coverage"] - before["coverage"], 2)
+    return {
+        "before_coverage": before.get("coverage"),
+        "after_coverage": after.get("coverage"),
+        "delta": delta,
+        "before_passed": before.get("passed"),
+        "after_passed": after.get("passed"),
+        "before_duration": before.get("duration", 0.0),
+        "after_duration": after.get("duration", 0.0),
+        "tests_passed": after.get("passed", False),
+    }
+
+
+# ===========================================================
+# Contributor Tracking
+# ===========================================================
+
+def track_contributors(repo: Repository) -> dict:
+    r = subprocess.run(
+        ["git", "log", "--pretty=format:%H|%s|%ad", "--date=iso"],
+        cwd=str(repo.resolve_path()),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    total = auto_count = manual_count = 0
+    last_manual = None
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        total += 1
+        parts = line.split("|", 2)
+        if len(parts) < 2:
+            continue
+        msg, date = parts[1], parts[2] if len(parts) > 2 else ""
+        if msg.startswith("auto:") or msg.startswith("auto-evolve:"):
+            auto_count += 1
+        else:
+            manual_count += 1
+            if date and (last_manual is None or date > last_manual):
+                last_manual = date.split()[0]
+    return {
+        "total_commits": total,
+        "auto_commits": auto_count,
+        "manual_commits": manual_count,
+        "auto_percentage": round((auto_count / total) * 100, 1) if total else 0.0,
+        "last_manual_commit": last_manual,
+    }
+
+
+# ===========================================================
+# Release Management
+# ===========================================================
+
+def create_release(repo: Repository, version: str, changelog: str = "") -> None:
+    repo_path = repo.resolve_path()
+    tag = "v" + version.lstrip("v")
+    subprocess.run(["git", "tag", tag, "-m", "Release " + version.lstrip("v")], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "push", "origin", tag], cwd=str(repo_path), check=True)
+    r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(repo_path), capture_output=True, text=True)
+    m = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", r.stdout.strip())
+    if not m:
+        print("Tag " + tag + " created and pushed.")
+        return
+    slug = m.group(1)
+    notes = "# Release " + version.lstrip("v") + "\n\n" + changelog + "\n\n## auto-evolve\nManaged by auto-evolve.\n"
+    gr = subprocess.run(
+        ["gh", "release", "create", tag, "--title", tag, "--notes", notes, "--repo", slug],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    if gr.returncode == 0:
+        print("Release " + tag + " created: " + gr.stdout.strip())
+    else:
+        print("Tag " + tag + " created. gh failed: " + gr.stderr.strip())
+
+
+# ===========================================================
+# Priority Calculation
 # ===========================================================
 
 def infer_value_score(item: ChangeItem) -> int:
@@ -479,11 +1119,8 @@ def infer_value_score(item: ChangeItem) -> int:
     desc_lower = item.description.lower()
     opt_type = (item.optimization_type or "").lower()
 
-    # Bug fixes are highest value
     if "bug" in desc_lower or "fix" in desc_lower:
         return DEFAULT_VALUE_SCORES["bug_fix"]
-
-    # Optimization types
     if opt_type == "todo_fixme":
         return DEFAULT_VALUE_SCORES["todo_fixme"]
     if opt_type == "missing_test":
@@ -494,81 +1131,49 @@ def infer_value_score(item: ChangeItem) -> int:
         return DEFAULT_VALUE_SCORES["optimization"]
     if opt_type == "outdated_dep":
         return DEFAULT_VALUE_SCORES["optimization"]
-
-    # File-based heuristics
     if "test" in desc_lower:
         return DEFAULT_VALUE_SCORES["add_test"]
     if any(kw in desc_lower for kw in ("readme", "changelog", "docs")):
         return DEFAULT_VALUE_SCORES["docs"]
     if "lint" in desc_lower or "format" in desc_lower:
         return DEFAULT_VALUE_SCORES["lint_fix"]
-
-    return 5  # default
+    return 5
 
 
 def infer_risk_score(risk: RiskLevel) -> int:
-    """Infer risk score (1-10) from RiskLevel."""
-    mapping = {
-        RiskLevel.LOW: 2,
-        RiskLevel.MEDIUM: 5,
-        RiskLevel.HIGH: 9,
-    }
+    mapping = {RiskLevel.LOW: 2, RiskLevel.MEDIUM: 5, RiskLevel.HIGH: 9}
     return mapping.get(risk, 5)
 
 
 def infer_cost_score(item: ChangeItem) -> int:
-    """Infer cost score (1-10) from change type and scope."""
     desc_lower = item.description.lower()
     file_path = item.file_path.lower()
-
-    # Small, localized changes
     if any(kw in desc_lower for kw in ("todo", "fixme", "lint", "format", "typo")):
         return 1
-
-    # Documentation only
     if any(ext in file_path for ext in (".md", ".txt", ".rst")):
         if "readme" in file_path or "changelog" in file_path:
             return 2
         return 1
-
-    # Test files
     if "test" in file_path or "_test." in file_path:
         return 3
-
-    # Code refactors - estimate by scope
     num_files = desc_lower.count(",") + 1
     if num_files <= 2:
         return 4
     elif num_files <= 5:
         return 6
-    else:
-        return 8
-
-    return 5  # default
+    return 8
 
 
 def calculate_priority(item: ChangeItem) -> float:
-    """
-    Calculate priority score: P = (value * w_value) / (risk * cost)
-
-    - value: 1-10 (higher = more valuable)
-    - risk: 1-10 (higher = riskier)
-    - cost: 1-10 (higher = more expensive)
-
-    Returns priority score (higher = more urgent).
-    """
     value = item.value_score
     risk = item.risk_score
     cost = item.cost_score
-
     if risk * cost == 0:
         return 0.0
-
     return round((value * PRIORITY_WEIGHTS["value"]) / (risk * cost), 3)
 
 
 def enrich_change_with_priority(item: ChangeItem) -> ChangeItem:
-    """Populate value/risk/cost scores and compute priority for a ChangeItem."""
     item.value_score = infer_value_score(item)
     item.risk_score = infer_risk_score(item.risk)
     item.cost_score = infer_cost_score(item)
@@ -577,18 +1182,15 @@ def enrich_change_with_priority(item: ChangeItem) -> ChangeItem:
 
 
 def sort_by_priority(items: list[ChangeItem]) -> list[ChangeItem]:
-    """Sort ChangeItems by priority score (descending)."""
     return sorted(items, key=lambda x: x.priority, reverse=True)
 
 
 def priority_color(p: float) -> str:
-    """Return color indicator based on priority score."""
     if p >= 0.7:
         return "🟢"
     elif p >= 0.4:
         return "🟡"
-    else:
-        return "🔴"
+    return "🔴"
 
 
 # ===========================================================
@@ -619,7 +1221,7 @@ def get_default_config() -> dict:
             "require_confirm_before_execute": True,
         },
         "schedule_interval_hours": 168,
-        "schedule_cron_id": None,  # v3.0: track cron job ID
+        "schedule_cron_id": None,
         "repositories": [
             {
                 "path": str(HOME / ".openclaw" / "workspace" / "skills" / "soul-force"),
@@ -641,7 +1243,7 @@ def get_default_config() -> dict:
 
 
 def config_to_repos(config: dict) -> list[Repository]:
-    repos = []
+    repos: list[Repository] = []
     for r in config.get("repositories", []):
         repos.append(Repository(
             path=r["path"],
@@ -649,6 +1251,7 @@ def config_to_repos(config: dict) -> list[Repository]:
             visibility=r.get("visibility", "public"),
             auto_monitor=r.get("auto_monitor", True),
             risk_override=r.get("risk_override"),
+            scan_interval_hours=r.get("scan_interval_hours", 168),
         ))
     return repos
 
@@ -661,6 +1264,7 @@ def repos_to_config(repos: list[Repository], config: dict) -> dict:
             "visibility": r.visibility,
             "auto_monitor": r.auto_monitor,
             "risk_override": r.risk_override,
+            "scan_interval_hours": r.scan_interval_hours,
         }
         for r in repos
     ]
@@ -728,7 +1332,6 @@ def save_learnings(data: dict) -> None:
     ensure_learnings_dir()
     rejections_file = LEARNINGS_DIR / "rejections.json"
     approvals_file = LEARNINGS_DIR / "approvals.json"
-
     rejections_file.write_text(json.dumps({"rejections": data.get("rejections", [])}, indent=2))
     approvals_file.write_text(json.dumps({"approvals": data.get("approvals", [])}, indent=2))
 
@@ -741,11 +1344,6 @@ def add_learning(
     repo: str,
     approved_by: Optional[str] = None,
 ) -> None:
-    """
-    Add an entry to learning history (rejections or approvals).
-
-    v3.0: Extended to track approval reasons via approved_by field.
-    """
     data = load_learnings()
     entry: dict = {
         "id": hashlib.sha256(
@@ -758,8 +1356,6 @@ def add_learning(
         "date": datetime.now(timezone.utc).date().isoformat(),
         "repo": repo,
     }
-
-    # v3.0: Track who/what approved this
     if learning_type == "approval" and approved_by:
         entry["approved_by"] = approved_by
 
@@ -772,7 +1368,6 @@ def add_learning(
 
 
 def is_rejected(change_desc: str, repo: str, learnings: dict) -> bool:
-    """Check if a change matching the description has been rejected before."""
     for rej in learnings.get("rejections", []):
         if rej.get("repo") == repo and rej.get("description") == change_desc:
             return True
@@ -783,11 +1378,7 @@ def is_rejected(change_desc: str, repo: str, learnings: dict) -> bool:
 # Git Operations
 # ===========================================================
 
-def git_run(
-    repo: Repository,
-    *args: str,
-    check: bool = True,
-) -> subprocess.CompletedProcess:
+def git_run(repo: Repository, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(
         ["git"] + list(args),
         cwd=str(repo.resolve_path()),
@@ -804,7 +1395,7 @@ def git_status(repo: Repository) -> list[dict]:
     if not result.stdout.strip():
         return []
 
-    changes = []
+    changes: list[dict] = []
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
@@ -836,11 +1427,7 @@ def git_commit(repo: Repository, message: str) -> str:
     return hash_result.stdout.strip()
 
 
-def git_push(
-    repo: Repository,
-    remote: str = "origin",
-    branch: Optional[str] = None,
-) -> None:
+def git_push(repo: Repository, remote: str = "origin", branch: Optional[str] = None) -> None:
     branch = branch or git_current_branch(repo)
     git_run(repo, "push", "-u", remote, branch)
 
@@ -856,20 +1443,14 @@ def git_revert(repo: Repository, ref: str) -> str:
 
 
 def git_log(repo: Repository, limit: int = 50) -> list[dict]:
-    result = git_run(
-        repo, "log", "--pretty=format:%H|%s|%ad", "--date=iso", f"-n{limit}"
-    )
-    commits = []
+    result = git_run(repo, "log", "--pretty=format:%H|%s|%ad", "--date=iso", f"-n{limit}")
+    commits: list[dict] = []
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
         parts = line.split("|", 2)
         if len(parts) == 3:
-            commits.append({
-                "hash": parts[0],
-                "message": parts[1],
-                "date": parts[2],
-            })
+            commits.append({"hash": parts[0], "message": parts[1], "date": parts[2]})
     return commits
 
 
@@ -882,7 +1463,6 @@ def git_diff(repo: Repository, ref: Optional[str] = None) -> str:
 
 
 def compute_file_hash(repo: Repository, file_path: str) -> Optional[str]:
-    """Compute SHA256 hash of a file for closed-repo sanitization."""
     try:
         full_path = repo.resolve_path() / file_path
         if full_path.exists():
@@ -894,14 +1474,7 @@ def compute_file_hash(repo: Repository, file_path: str) -> Optional[str]:
     return None
 
 
-def git_staged_diff(repo: Repository) -> str:
-    """Get diff of staged changes."""
-    result = git_run(repo, "diff", "--cached", "--numstat")
-    return result.stdout
-
-
 def git_diff_lines_added_removed(repo: Repository) -> tuple[int, int]:
-    """Count lines added/removed in working tree vs HEAD."""
     try:
         result = git_run(repo, "diff", "--numstat", "HEAD")
         lines_added = 0
@@ -923,9 +1496,7 @@ def git_diff_lines_added_removed(repo: Repository) -> tuple[int, int]:
         return 0, 0
 
 
-# v3.0: Git conflict handling
 def get_conflict_files(repo_path: Path) -> list[str]:
-    """Get list of files with git conflicts."""
     result = subprocess.run(
         ["git", "diff", "--name-only", "--diff-filter=U"],
         cwd=str(repo_path),
@@ -938,58 +1509,30 @@ def get_conflict_files(repo_path: Path) -> list[str]:
 
 
 def resolve_conflicts_simple(repo_path: Path, conflict_files: list[str]) -> None:
-    """
-    Attempt simple auto-resolution for conflicts.
-    For each conflicted file, prefer 'ours' (current branch) version.
-    """
     for f in conflict_files:
-        # Use --theirs to accept incoming changes for a simple approach
-        # In practice, this depends on the conflict type
-        subprocess.run(
-            ["git", "checkout", "--theirs", f],
-            cwd=str(repo_path),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "add", f],
-            cwd=str(repo_path),
-            capture_output=True,
-        )
+        subprocess.run(["git", "checkout", "--theirs", f], cwd=str(repo_path), capture_output=True)
+        subprocess.run(["git", "add", f], cwd=str(repo_path), capture_output=True)
 
 
 def handle_pr_conflict(repo: Repository, branch: str) -> str:
-    """
-    Handle git conflicts when rebasing a PR branch onto main.
-
-    Returns:
-        "clean" - rebase succeeded with no conflicts
-        "auto_resolved" - conflicts found and auto-resolved
-        "manual_required" - conflicts too complex, needs human intervention
-    """
     try:
-        # Fetch latest main
         subprocess.run(
             ["git", "fetch", "origin", "main"],
             cwd=str(repo.resolve_path()),
             capture_output=True,
             text=True,
         )
-
-        # Attempt rebase
         result = subprocess.run(
-            ["git", "rebase", f"origin/main"],
+            ["git", "rebase", "origin/main"],
             cwd=str(repo.resolve_path()),
             capture_output=True,
             text=True,
         )
-
         if result.returncode == 0:
             return "clean"
 
-        # Conflicts detected
         conflict_files = get_conflict_files(repo.resolve_path())
         if len(conflict_files) <= 2:
-            # Few conflicts - try auto-resolve
             resolve_conflicts_simple(repo.resolve_path(), conflict_files)
             cont_result = subprocess.run(
                 ["git", "rebase", "--continue"],
@@ -1001,7 +1544,6 @@ def handle_pr_conflict(repo: Repository, branch: str) -> str:
                 return "auto_resolved"
 
         return "manual_required"
-
     except Exception:
         return "manual_required"
 
@@ -1014,18 +1556,11 @@ def classify_change(repo: Repository, change_type: str, file_path: str) -> RiskL
     default_risk = repo.get_default_risk(change_type, file_path)
     file_lower = file_path.lower()
 
-    high_risk_patterns = [
-        "remove", "delete", "deprecate", "break",
-        "rename", "migrate", "architect", "security",
-    ]
+    high_risk_patterns = ["remove", "delete", "deprecate", "break", "rename", "migrate", "architect", "security"]
     if any(p in file_lower for p in high_risk_patterns):
         return RiskLevel.HIGH
 
-    low_risk_patterns = [
-        "readme", "skill.md", "changelog", ".gitignore",
-        "license", "comments", "typo", "format", "lint",
-        "refactor", "rename",
-    ]
+    low_risk_patterns = ["readme", "skill.md", "changelog", ".gitignore", "license", "comments", "typo", "format", "lint", "refactor", "rename"]
     if change_type == "removed":
         if any(p in file_lower for p in ["__init__", "config", "core"]):
             return RiskLevel.HIGH
@@ -1041,40 +1576,23 @@ def classify_change(repo: Repository, change_type: str, file_path: str) -> RiskL
 # Optimization Scanner
 # ===========================================================
 
-ANNOTATION_PATTERN = re.compile(
-    r"(\b(TODO|FIXME|XXX|HACK|NOTE)\b.*?)$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-LONG_FUNCTION_PATTERN = re.compile(
-    r"^(?:def |async def |class |async def .*?\([\s\S]*?\):[ \t]*\n)",
-    re.MULTILINE,
-)
-
+ANNOTATION_PATTERN = re.compile(r"(\b(TODO|FIXME|XXX|HACK|NOTE)\b.*?)$", re.IGNORECASE | re.MULTILINE)
 PINNED_VERSION = re.compile(r"==\d+\.\d+\.\d+")
 
 
 def scan_optimizations(repo: Repository) -> list[OptimizationFinding]:
-    "Scan for optimization opportunities across all supported languages."
     findings = []
     repo_path = repo.resolve_path()
-
-    # v3.0: Multi-language TODO scanning
     findings.extend(scan_todos_multilang(repo))
-
     for py_file in repo_path.rglob("*.py"):
         rel_path = py_file.relative_to(repo_path)
         findings.extend(_scan_python_file(py_file, rel_path))
-
-    # v3.0: Also scan JS/TS/Go for long functions
     for ext in ("*.js", "*.ts", "*.go"):
         for code_file in repo_path.rglob(ext):
             rel_path = code_file.relative_to(repo_path)
             findings.extend(_scan_code_file(code_file, rel_path))
-
     findings.extend(_scan_test_coverage(repo_path, repo_path))
     findings.extend(_scan_dependencies(repo_path))
-
     return findings
 
 
@@ -1084,26 +1602,19 @@ def _scan_python_file(py_file: Path, rel_path: Path) -> list[OptimizationFinding
         content = py_file.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return findings
-
     findings.extend(_scan_annotations(py_file, rel_path, content=content))
     findings.extend(_scan_duplicate_code(content, rel_path))
     findings.extend(_scan_long_functions(content, rel_path))
-
     return findings
 
 
-def _scan_annotations(
-    file_path: Path,
-    rel_path: Path,
-    content: Optional[str] = None,
-) -> list[OptimizationFinding]:
+def _scan_annotations(file_path: Path, rel_path: Path, content: Optional[str] = None) -> list[OptimizationFinding]:
     findings = []
     if content is None:
         try:
             content = file_path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             return findings
-
     for i, line in enumerate(content.split("\n"), 1):
         if ANNOTATION_PATTERN.search(line):
             findings.append(OptimizationFinding(
@@ -1114,49 +1625,64 @@ def _scan_annotations(
                 suggestion="Address or document this TODO/FIXME/XXX",
                 risk=RiskLevel.LOW,
             ))
-
     return findings
 
 
 def _scan_code_file(code_file: Path, rel_path: Path) -> list[OptimizationFinding]:
-    """Scan non-Python code files for long functions (v3.0)."""
     findings = []
-    try: content = code_file.read_text(encoding="utf-8")
-    except: return findings
-    lines = content.split("\\n")
-    open_braces = 0; func_start = 0; in_func = False; func_name = ""
+    try:
+        content = code_file.read_text(encoding="utf-8")
+    except Exception:
+        return findings
+    lines = content.split("\n")
+    open_braces = 0
+    func_start = 0
+    in_func = False
+    func_name = ""
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if re.match(r"(?:export\\s+)?(?:async\\s+)?function\\s+\\w+", stripped):
-            m = re.search(r"function\\s+(\\w+)", stripped)
+        if re.match(r"(?:export\s+)?(?:async\s+)?function\s+\w+", stripped):
+            m = re.search(r"function\s+(\w+)", stripped)
             func_name = m.group(1) if m else "anon"
-            func_start = i; in_func = True; open_braces = 0
-        elif re.match(r"(?:export\\s+)?(?:const|let|var)\\s+\\w+\\s*=\\s*(?:async\\s+)?\\(", stripped):
-            m = re.search(r"(?:const|let|var)\\s+(\\w+)", stripped)
+            func_start = i
+            in_func = True
+            open_braces = 0
+        elif re.match(r"(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?\(", stripped):
+            m = re.search(r"(?:const|let|var)\s+(\w+)", stripped)
             func_name = m.group(1) if m else "anon"
-            func_start = i; in_func = True; open_braces = 0
-        elif re.match(r"func\\s+\\w+", stripped):
-            m = re.search(r"func\\s+(\\w+)", stripped)
+            func_start = i
+            in_func = True
+            open_braces = 0
+        elif re.match(r"func\s+\w+", stripped):
+            m = re.search(r"func\s+(\w+)", stripped)
             func_name = m.group(1) if m else "anon"
-            func_start = i; in_func = True; open_braces = 0
+            func_start = i
+            in_func = True
+            open_braces = 0
         if in_func:
             open_braces += stripped.count("{") - stripped.count("}")
             if open_braces <= 0 and "{" in stripped:
                 func_lines = i - func_start + 1
                 if func_lines > 100:
-                    findings.append(OptimizationFinding(type="long_function", file_path=str(rel_path), line=func_start + 1, description="Function [" + func_name + "] is " + str(func_lines) + " lines (>100)", suggestion="Split into smaller functions", risk=RiskLevel.MEDIUM))
+                    findings.append(OptimizationFinding(
+                        type="long_function",
+                        file_path=str(rel_path),
+                        line=func_start + 1,
+                        description=f"Function [{func_name}] is {func_lines} lines (>100)",
+                        suggestion="Split into smaller functions",
+                        risk=RiskLevel.MEDIUM,
+                    ))
                 in_func = False
     return findings
 
 
 def _scan_duplicate_code(content: str, rel_path: Path) -> list[OptimizationFinding]:
     findings = []
-    strings = re.findall(r'"{3}[\s\S]*?"{3}|"{1,2}[^"]{30,200}"{1,2}', content)
+    strings = re.findall(r'"""{1,}[\s\S]*?"{3}|"{1,2}[^"]{30,200}"{1,2}', content)
     string_counts: dict[str, list[int]] = {}
     for s in strings:
         key = s[:50]
         string_counts.setdefault(key, []).append(len(s))
-
     for key, counts in string_counts.items():
         if len(counts) >= 3:
             findings.append(OptimizationFinding(
@@ -1168,7 +1694,6 @@ def _scan_duplicate_code(content: str, rel_path: Path) -> list[OptimizationFindi
                 risk=RiskLevel.LOW,
             ))
             break
-
     return findings
 
 
@@ -1183,7 +1708,6 @@ def _scan_long_functions(content: str, rel_path: Path) -> list[OptimizationFindi
     for i, line in enumerate(lines):
         stripped = line.lstrip()
         indent = len(line) - len(stripped)
-
         func_match = re.match(r"(?:async )?def (\w+)\s*\(", stripped)
         if func_match:
             if in_function:
@@ -1214,7 +1738,6 @@ def _scan_long_functions(content: str, rel_path: Path) -> list[OptimizationFindi
                         risk=RiskLevel.MEDIUM,
                     ))
                 in_function = False
-
     return findings
 
 
@@ -1223,7 +1746,6 @@ def _scan_test_coverage(repo_path: Path, scan_root: Path) -> list[OptimizationFi
     tests_dir = scan_root / "tests"
     if not tests_dir.exists():
         return findings
-
     main_modules: set[Path] = set()
     for py_file in scan_root.rglob("*.py"):
         rel = py_file.relative_to(scan_root)
@@ -1232,21 +1754,16 @@ def _scan_test_coverage(repo_path: Path, scan_root: Path) -> list[OptimizationFi
         if rel.name == "__init__.py" or rel.name.startswith("_"):
             continue
         main_modules.add(rel.parent / rel.stem)
-
     test_modules: set[Path] = set()
     if tests_dir.exists():
         for test_file in tests_dir.rglob("test_*.py"):
             rel = test_file.relative_to(tests_dir)
             test_modules.add(rel.parent / rel.stem)
-
     untested = []
     for mod in sorted(main_modules):
-        mod_parts = mod.parts
-        if len(mod_parts) <= 2:
-            test_path = tests_dir / ("test_" + mod.name + ".py")
-            if not test_path.exists():
-                untested.append(str(mod))
-
+        test_path = tests_dir / ("test_" + mod.name + ".py")
+        if not test_path.exists():
+            untested.append(str(mod))
     if untested:
         findings.append(OptimizationFinding(
             type="missing_test",
@@ -1256,7 +1773,6 @@ def _scan_test_coverage(repo_path: Path, scan_root: Path) -> list[OptimizationFi
             suggestion="Add tests for the untested modules",
             risk=RiskLevel.MEDIUM,
         ))
-
     return findings
 
 
@@ -1281,7 +1797,6 @@ def _scan_dependencies(repo_path: Path) -> list[OptimizationFinding]:
                     ))
         except (UnicodeDecodeError, OSError):
             pass
-
     return findings
 
 
@@ -1337,11 +1852,9 @@ def save_iteration(
 
 
 def save_metrics(metrics: IterationMetrics) -> None:
-    """v3.0: Save iteration metrics to metrics.json."""
     iter_dir = ensure_iterations_dir() / metrics.iteration_id
     iter_dir.mkdir(parents=True, exist_ok=True)
-    metrics_file = iter_dir / "metrics.json"
-    metrics_file.write_text(json.dumps(asdict(metrics), indent=2))
+    (iter_dir / "metrics.json").write_text(json.dumps(asdict(metrics), indent=2))
 
 
 def update_catalog(manifest: IterationManifest) -> None:
@@ -1356,7 +1869,7 @@ def update_catalog(manifest: IterationManifest) -> None:
         if i.get("version") != manifest.version
     ]
 
-    catalog["iterations"].insert(0, {
+    catalog_entry = {
         "version": manifest.version,
         "date": manifest.date,
         "status": manifest.status,
@@ -1370,8 +1883,11 @@ def update_catalog(manifest: IterationManifest) -> None:
         "metrics_id": manifest.metrics_id,
         "test_coverage_delta": manifest.test_coverage_delta,
         "contributors": manifest.contributors,
-    })
+        "total_cost_usd": manifest.total_cost_usd,
+        "llm_calls": manifest.llm_calls,
+    }
 
+    catalog["iterations"].insert(0, catalog_entry)
     catalog_file.parent.mkdir(parents=True, exist_ok=True)
     catalog_file.write_text(json.dumps(catalog, indent=2))
 
@@ -1402,13 +1918,11 @@ def run_quality_gates(repo: Repository) -> dict:
         "syntax_errors": [],
         "lint_errors_fixed": 0,
     }
-
     for py_file in repo.resolve_path().rglob("*.py"):
         if not check_syntax(str(py_file)):
             results["syntax_ok"] = False
             results["syntax_errors"].append(str(py_file))
             results["passed"] = False
-
     return results
 
 
@@ -1417,10 +1931,8 @@ def run_quality_gates(repo: Repository) -> dict:
 # ===========================================================
 
 def sanitize_pending_item(item: dict, repo: Repository) -> dict:
-    """Remove sensitive content from pending items for closed repos."""
     if not repo.is_closed():
         return item
-
     sanitized = dict(item)
     if "file_path" in sanitized:
         fp = sanitized["file_path"]
@@ -1433,23 +1945,19 @@ def sanitize_pending_item(item: dict, repo: Repository) -> dict:
         except OSError:
             pass
         sanitized["file_path"] = "[REDACTED]"
-
     sanitized["description"] = "[CLOSED REPO] Change requires manual review"
     sanitized["content_redacted"] = True
-
     return sanitized
 
 
 def sanitize_change_for_log(change: ChangeItem, repo: Repository) -> str:
-    """Return sanitized change representation for log files."""
     if not repo.is_closed():
         return f"{change.change_type}: {change.file_path}"
-
     return f"{change.change_type}: [FILE REDACTED for closed repo]"
 
 
 # ===========================================================
-# Execution Preview (v3.0: Priority-sorted)
+# Execution Preview
 # ===========================================================
 
 def print_execution_preview(
@@ -1458,15 +1966,12 @@ def print_execution_preview(
     mode: OperationMode,
     rules: dict,
 ) -> None:
-    """Print a preview of what will be executed, sorted by priority."""
     if mode == OperationMode.SEMI_AUTO:
         print("\n⚠️  Semi-Auto Mode: About to execute auto-changes:")
     else:
         print("\n⚠️  Full-Auto Mode: About to execute changes:")
 
     print(f"  Total: {len(auto_exec)} change(s)")
-
-    # v3.0: Sort by priority
     sorted_exec = sort_by_priority(auto_exec)
 
     for i, c in enumerate(sorted_exec, 1):
@@ -1474,72 +1979,44 @@ def print_execution_preview(
         opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
         risk_label = c.risk.value.upper()
         print(f"  [{i}] {color} P={c.priority:.2f} {risk_label}: {c.description[:60]}{opt_badge}")
-
     print()
 
 
 # ===========================================================
-# PR Batch Merging (v2.2)
+# PR Batch Merging
 # ===========================================================
 
 def should_merge_prs(changes: list[dict]) -> bool:
-    """
-    v3.0: Determine whether multiple small PRs should be merged into one.
-
-    Returns True if:
-    - At least 3 changes
-    - Same or similar types (len(types) <= 2)
-    - Related files (len(files) <= 5)
-    """
     if len(changes) < 3:
         return False
-
     types = set(c.get("type", "") for c in changes)
     files = set(c.get("file", "") for c in changes)
-
     return len(types) <= 2 and len(files) <= 5
 
 
 def group_similar_changes(changes: list[dict]) -> list[list[dict]]:
-    """
-    v3.0: Group changes that should be merged together.
-    Returns list of groups, each group is a list of changes.
-    """
     if not should_merge_prs(changes):
         return [[c] for c in changes]
-
-    # Group by type
     by_type: dict[str, list[dict]] = {}
     for c in changes:
         t = c.get("type", "unknown")
         by_type.setdefault(t, []).append(c)
-
-    groups = []
+    groups: list[list[dict]] = []
     for t, type_changes in by_type.items():
-        # Split by file scope
         by_file: dict[str, list[dict]] = {}
         for c in type_changes:
             files_key = ",".join(sorted(c.get("file", "").split("/")[:2]))
             by_file.setdefault(files_key, []).append(c)
-
         for file_key, file_changes in by_file.items():
             if len(file_changes) >= 2:
                 groups.append(file_changes)
             else:
                 groups.extend([[c] for c in file_changes])
-
     return groups
 
 
 def build_merged_pr_body(groups: list[list[dict]]) -> str:
-    """v3.0: Build PR body for a merged PR."""
-    lines = [
-        "## auto-evolve: Batch improvement",
-        "",
-        "### Changes",
-        "",
-    ]
-
+    lines = ["## auto-evolve: Batch improvement", "", "### Changes", ""]
     for group in groups:
         if len(group) == 1:
             c = group[0]
@@ -1548,34 +2025,48 @@ def build_merged_pr_body(groups: list[list[dict]]) -> str:
             lines.append(f"- {len(group)} changes of type: {group[0].get('type', 'unknown')}")
             for c in group:
                 lines.append(f"  - {c.get('description', c.get('file_path', 'unknown'))}")
-
-    lines.extend([
-        "",
-        "### Approval",
-        "",
-        "This PR was auto-generated and merged for efficiency.",
-        "Run `auto-evolve.py log` to review all changes.",
-    ])
-
+    lines.extend(["", "### Approval", "", "This PR was auto-generated and merged for efficiency.", "Run `auto-evolve.py log` to review all changes."])
     return "\n".join(lines)
 
 
+# ===========================================================
+# LLM Analysis on Changes
+# ===========================================================
 
-def run_llm_analysis_on_changes(changes, repo):
-    "Run LLM analysis on pending high-priority changes (v3.0)."
+def run_llm_analysis_on_changes(
+    changes: list[ChangeItem],
+    repo: Repository,
+    cost_tracker: Optional[CostTracker] = None,
+) -> list[ChangeItem]:
+    """Run LLM analysis on pending high-priority changes. Tracks costs if CostTracker provided."""
     config = get_openclaw_llm_config()
-    if not config["api_key"] or not config["base_url"]: return changes
+    if not config["api_key"] or not config["base_url"]:
+        return changes
+
     pending = [c for c in changes if c.category == ChangeCategory.PENDING_APPROVAL]
     top = sort_by_priority(pending)[:5]
-    analyzed = set()
+    analyzed: set[int] = set()
+
     for item in top:
-        if item.id in analyzed: continue
+        if item.id in analyzed:
+            continue
         fp = repo.resolve_path() / item.file_path
-        if not fp.exists() or not fp.is_file(): continue
-        try: content = fp.read_text(encoding="utf-8")
-        except: continue
-        ctx = "File: " + item.file_path + "\\nChange type: " + item.change_type + "\\nRisk: " + item.risk.value + "\\nCategory: " + item.category.value
+        if not fp.exists() or not fp.is_file():
+            continue
+        try:
+            content = fp.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        ctx = f"File: {item.file_path}\nChange type: {item.change_type}\nRisk: {item.risk.value}\nCategory: {item.category.value}"
         result = analyze_with_llm(content, ctx, item.file_path)
+
+        # v3.1: Track LLM call cost
+        if cost_tracker:
+            prompt_tokens = len(ctx + content[:2000]) // 4  # rough estimate
+            completion_tokens = len(result.get("suggestion", "")) // 4
+            cost_tracker.track_llm_call(prompt_tokens, completion_tokens, config["model"])
+
         if result.get("available"):
             item.llm_suggestion = result.get("suggestion", "")
             item.llm_risk = result.get("risk_level", item.risk.value)
@@ -1584,7 +2075,9 @@ def run_llm_analysis_on_changes(changes, repo):
                 item.risk = RiskLevel(item.llm_risk)
                 enrich_change_with_priority(item)
             analyzed.add(item.id)
-            if item.llm_suggestion: print("  [LLM] " + item.llm_suggestion[:80])
+            if item.llm_suggestion:
+                print("  [LLM] " + item.llm_suggestion[:80])
+
     return changes
 
 
@@ -1596,33 +2089,42 @@ def run_scan(
     repo: Repository,
     dry_run: bool = False,
     learnings: Optional[dict] = None,
-) -> tuple[list[ChangeItem], list[OptimizationFinding], list[str]]:
-    changes = []
-    opts = []
-    plan_lines = []
+    before_snapshots: Optional[dict[str, dict]] = None,
+    cost_tracker: Optional[CostTracker] = None,
+) -> tuple[list[ChangeItem], list[OptimizationFinding], list[str], dict[str, dict]]:
+    """
+    Run a full scan on a repository.
+    Returns: (changes, optimizations, plan_lines, after_snapshots)
+    """
+    changes: list[ChangeItem] = []
+    opts: list[OptimizationFinding] = []
+    plan_lines: list[str] = []
     change_id = 1
     learnings = learnings or {"rejections": [], "approvals": []}
+
+    # Take before snapshot for effect tracking
+    if before_snapshots is not None:
+        effect_tracker = EffectTracker()
+        before_snapshots[repo.path] = effect_tracker.snapshot(repo.resolve_path())
 
     # 1. Git changes
     git_changes = git_status(repo)
     changed_files = [gc["file"] for gc in git_changes]
 
-    # v3.0: Dependency analysis
-    dep_affected = {}
+    # Dependency analysis
+    dep_affected: dict[str, list[str]] = {}
     if changed_files:
         dep_affected = analyze_dependencies(repo, changed_files)
-        if dep_affected:
-            for changed, deps in dep_affected.items():
-                print("  [!] Dependency Alert: Changing: " + changed)
-                for dep in deps: print("     May affect: " + dep)
+        for changed, deps in dep_affected.items():
+            print("  [!] Dependency Alert: Changing: " + changed)
+            for dep in deps:
+                print("     May affect: " + dep)
 
     for gc in git_changes:
         if is_rejected(gc["file"], repo.path, learnings):
             continue
-
         risk = classify_change(repo, gc["type"], gc["file"])
         category = ChangeCategory.AUTO_EXEC if risk == RiskLevel.LOW else ChangeCategory.PENDING_APPROVAL
-
         item = ChangeItem(
             id=change_id,
             description=f"{gc['type']}: {gc['file']}",
@@ -1633,19 +2135,17 @@ def run_scan(
             repo_path=repo.path,
             repo_type=repo.type,
         )
-        # v3.0: Attach dependency info
         if gc["file"] in dep_affected:
             item.affected_files = dep_affected[gc["file"]]
         enrich_change_with_priority(item)
         changes.append(item)
         change_id += 1
 
-    # 2. Proactive optimizations (v3.0: multi-language)
+    # 2. Proactive optimizations
     opts = scan_optimizations(repo)
     for o in opts:
         if is_rejected(o.description, repo.path, learnings):
             continue
-
         item = ChangeItem(
             id=change_id,
             description=f"[opt] {o.type}: {o.description}",
@@ -1661,11 +2161,17 @@ def run_scan(
         changes.append(item)
         change_id += 1
 
-    return changes, opts, plan_lines
+    # Take after snapshot
+    after_snapshots: dict[str, dict] = {}
+    if before_snapshots is not None:
+        effect_tracker = EffectTracker()
+        after_snapshots[repo.path] = effect_tracker.snapshot(repo.resolve_path())
+
+    return changes, opts, plan_lines, after_snapshots
 
 
 # ===========================================================
-# Metrics Generation (v2.2)
+# Metrics Generation
 # ===========================================================
 
 def generate_metrics(
@@ -1677,13 +2183,12 @@ def generate_metrics(
     lines_removed: int,
     quality_gate_passed: bool,
 ) -> IterationMetrics:
-    """v3.0: Create metrics for an iteration."""
     return IterationMetrics(
         iteration_id=iteration_id,
         date=datetime.now(timezone.utc).isoformat(),
         todos_resolved=todos_resolved,
         lint_errors_fixed=lint_errors_fixed,
-        test_coverage_delta=0.0,  # Would need coverage tool to measure
+        test_coverage_delta=0.0,
         files_changed=files_changed,
         lines_added=lines_added,
         lines_removed=lines_removed,
@@ -1692,99 +2197,67 @@ def generate_metrics(
 
 
 def compute_todos_resolved(changes: list[ChangeItem]) -> int:
-    """Count TODO/FIXME items that will be resolved."""
-    return sum(
-        1 for c in changes
-        if c.optimization_type == "todo_fixme" or "todo" in c.description.lower()
-    )
+    return sum(1 for c in changes if c.optimization_type == "todo_fixme" or "todo" in c.description.lower())
 
 
 # ===========================================================
-# Cron Integration (v2.2)
+# Cron Integration
 # ===========================================================
 
 def setup_cron(interval_hours: int) -> bool:
-    """
-    v3.0: Try to create cron via openclaw CLI, fallback to manual command.
-
-    Returns True if cron was created, False if fallback to manual.
-    """
-    # Check if openclaw CLI is available
-    result = subprocess.run(
-        ["which", "openclaw"],
-        capture_output=True,
-    )
+    result = subprocess.run(["which", "openclaw"], capture_output=True)
     if result.returncode != 0:
         return False
 
-    # Try to create cron job
     cmd = [
         "openclaw", "cron", "add",
         "--name", "auto-evolve-scan",
         "--every", f"{interval_hours}h",
         "--message", "exec python3 ~/.openclaw/workspace/skills/auto-evolve/scripts/auto-evolve.py scan",
     ]
-
     add_result = subprocess.run(cmd, capture_output=True, text=True)
-
     if add_result.returncode == 0:
-        # Extract cron ID if present in output
         cron_id_match = re.search(r"cron[_-]?id[:\s]+([\w-]+)", add_result.stdout + add_result.stderr)
         cron_id = cron_id_match.group(1) if cron_id_match else None
-
-        # Save cron ID to config
         config = load_config()
         config["schedule_cron_id"] = cron_id
         save_config(config)
         return True
-
     return False
 
 
 def remove_cron() -> bool:
-    """v3.0: Remove auto-evolve cron job via openclaw CLI."""
     result = subprocess.run(["which", "openclaw"], capture_output=True)
     if result.returncode != 0:
         return False
-
     config = load_config()
     cron_id = config.get("schedule_cron_id")
-
     cmd = ["openclaw", "cron", "remove"]
     if cron_id:
         cmd.append(cron_id)
     else:
         cmd.append("auto-evolve-scan")
-
     rem_result = subprocess.run(cmd, capture_output=True, text=True)
-
     if rem_result.returncode == 0:
         config["schedule_cron_id"] = None
         save_config(config)
         return True
-
     return False
 
 
 # ===========================================================
-# Pending Review (Semi-Auto Mode)
+# Pending Review
 # ===========================================================
 
 def load_pending_review(iteration_id: str) -> list[dict]:
-    """Load pending items for a given iteration."""
     try:
-        return json.loads(
-            (ITERATIONS_DIR / iteration_id / "pending-review.json").read_text()
-        )
+        return json.loads((ITERATIONS_DIR / iteration_id / "pending-review.json").read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 
 def save_pending_review(iteration_id: str, items: list[dict]) -> None:
-    """Save pending review items."""
-    (ITERATIONS_DIR / iteration_id / "pending-review.json").write_text(
-        json.dumps(items, indent=2)
-    )
+    (ITERATIONS_DIR / iteration_id / "pending-review.json").write_text(json.dumps(items, indent=2))
 
 
 # ===========================================================
@@ -1798,7 +2271,7 @@ def cmd_scan(args) -> int:
     rules = get_full_auto_rules(config)
     learnings = load_learnings()
 
-    print("🔍 Auto-Evolve v2.2 Scanner")
+    print("🔍 Auto-Evolve v3.1 Scanner")
     print(f"   Mode: {mode.value}")
     print("=" * 50)
 
@@ -1808,18 +2281,22 @@ def cmd_scan(args) -> int:
     all_opts: list[OptimizationFinding] = []
     iteration_id = generate_iteration_id()
 
+    # v3.1: Trackers
+    effect_tracker = EffectTracker()
+    cost_tracker = CostTracker()
+    before_snapshots: dict[str, dict] = {}
+    after_snapshots: dict[str, dict] = {}
+
     for repo in repos:
         if not repo.auto_monitor:
             print(f"\n⏭️  Skipping {repo.path} (auto_monitor=false)")
             continue
-
         if not repo.resolve_path().exists():
             print(f"\n⚠️  Repository not found: {repo.path}")
             continue
 
         print(f"\n📦 Scanning: {repo.path} ({repo.type})")
 
-        # Run quality gates
         qg = run_quality_gates(repo)
         if not qg["passed"]:
             print(f"  ⚠️  Quality gate failed: {len(qg['syntax_errors'])} syntax error(s)")
@@ -1834,23 +2311,22 @@ def cmd_scan(args) -> int:
             alert = None
             print(f"  ✅ Quality gates passed")
 
-        changes, opts, _ = run_scan(repo, dry_run=dry_run, learnings=learnings)
+        changes, opts, _, after_snaps = run_scan(
+            repo,
+            dry_run=dry_run,
+            learnings=learnings,
+            before_snapshots=before_snapshots,
+            cost_tracker=cost_tracker,
+        )
         all_changes.extend(changes)
         all_opts.extend(opts)
+        after_snapshots.update(after_snaps)
 
     duration = time.time() - start_time
 
     # Categorize
-    auto_exec = [
-        c for c in all_changes
-        if c.category == ChangeCategory.AUTO_EXEC and c.risk == RiskLevel.LOW
-    ]
-    pending = [
-        c for c in all_changes
-        if c.category in (ChangeCategory.PENDING_APPROVAL, ChangeCategory.OPTIMIZATION)
-    ]
-
-    # v3.0: Sort pending by priority
+    auto_exec = [c for c in all_changes if c.category == ChangeCategory.AUTO_EXEC and c.risk == RiskLevel.LOW]
+    pending = [c for c in all_changes if c.category in (ChangeCategory.PENDING_APPROVAL, ChangeCategory.OPTIMIZATION)]
     pending_sorted = sort_by_priority(pending)
 
     print(f"\n📊 Scan Results:")
@@ -1859,7 +2335,6 @@ def cmd_scan(args) -> int:
     print(f"  Auto-executable:     {len(auto_exec)}")
     print(f"  Pending review:      {len(pending_sorted)}")
 
-    # v3.0: Priority queue display
     if pending_sorted:
         print(f"\n📊 Priority Queue:")
         for i, c in enumerate(pending_sorted[:10], 1):
@@ -1870,7 +2345,6 @@ def cmd_scan(args) -> int:
         if len(pending_sorted) > 10:
             print(f"  ... and {len(pending_sorted) - 10} more")
 
-    # Execution preview
     if auto_exec and not dry_run:
         print_execution_preview(all_changes, auto_exec, mode, rules)
 
@@ -1901,7 +2375,6 @@ def cmd_scan(args) -> int:
         "",
     ]
 
-    # Build pending items (with sanitization for closed repos)
     pending_items: list[dict] = []
     for c in pending_sorted:
         repo_obj = Repository(path=c.repo_path, type=c.repo_type)
@@ -1922,7 +2395,6 @@ def cmd_scan(args) -> int:
             item = sanitize_pending_item(item, repo_obj)
         pending_items.append(item)
 
-    # Mode-specific execution
     auto_executed: list[ChangeItem] = []
     iteration_status = "dry-run" if dry_run else mode.value
     repos_affected: set[str] = set()
@@ -1930,47 +2402,43 @@ def cmd_scan(args) -> int:
     lines_removed_total = 0
     files_changed_total = 0
     todos_resolved = 0
+    changed_files_all: list[str] = []
 
     if mode == OperationMode.FULL_AUTO and not dry_run:
         for change in auto_exec:
             if should_auto_execute(rules, change.risk):
                 try:
                     repo_obj = Repository(path=change.repo_path, type=change.repo_type)
-                    lines_before, _ = git_diff_lines_added_removed(repo_obj)
                     commit_hash = git_commit(repo_obj, f"auto: {change.description}")
                     change.commit_hash = commit_hash
                     auto_executed.append(change)
                     repos_affected.add(change.repo_path)
-
                     if change.optimization_type == "todo_fixme":
                         todos_resolved += 1
-
                     log_desc = sanitize_change_for_log(change, repo_obj)
                     print(f"  ✅ {log_desc} ({commit_hash})")
                 except Exception as e:
                     print(f"  ❌ {change.file_path}: {e}")
-
         remaining_pending = pending_sorted
         iteration_status = "full-auto-completed"
 
     elif mode == OperationMode.SEMI_AUTO and not dry_run:
         remaining_pending = auto_exec + pending_sorted
         iteration_status = "pending-approval"
-
         if auto_exec:
             print(f"\n📋 {len(auto_exec)} auto-changes held for confirmation (semi-auto mode)")
             print(f"   Run `auto-evolve.py confirm` after reviewing pending items")
-
     else:
         remaining_pending = auto_exec + pending_sorted
 
-    # Compute diff stats for all repos
+    # Compute diff stats
     for rp in repos_affected:
         repo_obj = Repository(path=rp, type="skill")
         la, lr = git_diff_lines_added_removed(repo_obj)
         lines_added_total += la
         lines_removed_total += lr
         files_changed_total += len(git_status(repo_obj))
+        changed_files_all.extend([g["file"] for g in git_status(repo_obj)])
 
     # Pending items display
     if remaining_pending:
@@ -1980,18 +2448,11 @@ def cmd_scan(args) -> int:
             risk_icon = RISK_COLORS.get(c.risk.value, "⚪")
             opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
             print(f"  [{i}] {risk_icon} P={c.priority:.2f} {c.description[:55]}{opt_badge}")
-
         if len(remaining_pending) > 20:
             print(f"  ... and {len(remaining_pending) - 20} more")
-
-        plan_lines.extend([
-            f"## Pending Items ({len(remaining_pending)})",
-            "",
-        ])
+        plan_lines.extend(["## Pending Items ({})".format(len(remaining_pending)), ""])
         for i, c in enumerate(remaining_pending, 1):
-            plan_lines.append(
-                f"- [{i}] **{c.risk.value.upper()}** P={c.priority:.2f} {c.description}"
-            )
+            plan_lines.append(f"- [{i}] **{c.risk.value.upper()}** P={c.priority:.2f} {c.description}")
 
     # Push auto-executed
     if auto_executed and not dry_run:
@@ -2003,7 +2464,35 @@ def cmd_scan(args) -> int:
             except Exception as e:
                 print(f"  ⚠️  Push failed: {e}")
 
-    # v3.0: Generate and save metrics
+    # v3.1: Flush LLM costs and compute effect
+    cost_tracker.flush_calls(iteration_id)
+    cost_summary = cost_tracker.get_iteration_cost(iteration_id)
+
+    # v3.1: Effect tracking
+    if before_snapshots and after_snapshots and (auto_executed or remaining_pending):
+        effect_report = effect_tracker.track_iteration_effect(
+            iteration_id=iteration_id,
+            before_snapshots=before_snapshots,
+            after_snapshots=after_snapshots,
+            todos_resolved=todos_resolved,
+            lint_errors_fixed=qg.get("lint_errors_fixed", 0),
+            coverage_delta=0.0,  # Would need test comparison to get actual delta
+        )
+        verdict_icon = {"positive": "✅", "neutral": "➖", "negative": "❌"}.get(effect_report["verdict"], "➖")
+        print(f"\n  {verdict_icon} Effect: {effect_report['summary']}")
+
+    # v3.1: Issue linking for committed changes
+    if auto_executed and not dry_run:
+        issue_linker = IssueLinker()
+        for rp in repos_affected:
+            repo_path = Path(rp)
+            repo_changed = [g["file"] for g in git_status(Repository(path=rp, type="skill"))]
+            if repo_changed:
+                close_result = issue_linker.close_related_issues(repo_path, repo_changed, iteration_id)
+                if close_result["found"] > 0:
+                    print(f"\n  🔗 IssueLinker: found {close_result['found']} related issue(s), closed {close_result['closed']}")
+
+    # Generate and save metrics
     quality_passed = alert is None
     metrics = generate_metrics(
         iteration_id=iteration_id,
@@ -2016,8 +2505,8 @@ def cmd_scan(args) -> int:
     )
     save_metrics(metrics)
 
-    # v3.0: Contributor tracking
-    contributors = {}
+    # Contributor tracking
+    contributors: dict = {}
     for rp in repos_affected:
         repo_obj = Repository(path=rp, type="skill")
         contributors[rp] = track_contributors(repo_obj)
@@ -2038,6 +2527,8 @@ def cmd_scan(args) -> int:
         metrics_id=iteration_id,
         test_coverage_delta=None,
         contributors=contributors,
+        total_cost_usd=cost_summary.get("total_cost_usd"),
+        llm_calls=cost_summary.get("total_calls", 0),
     )
 
     if contributors:
@@ -2050,8 +2541,9 @@ def cmd_scan(args) -> int:
 
     print(f"\n📁 Iteration {iteration_id} saved to .iterations/{iteration_id}/")
     print(f"   pending-review.json: {len(pending_items)} items")
-    print(f"   metrics.json: todos={metrics.todos_resolved}, files={metrics.files_changed}, "
-          f"+{metrics.lines_added}/-{metrics.lines_removed}")
+    print(f"   metrics.json: todos={metrics.todos_resolved}, files={metrics.files_changed}, +{metrics.lines_added}/-{metrics.lines_removed}")
+    if cost_summary.get("total_calls", 0) > 0:
+        print(f"   💰 LLM cost: ${cost_summary['total_cost_usd']:.6f} ({cost_summary['total_calls']} calls)")
 
     if mode == OperationMode.SEMI_AUTO and auto_exec and not dry_run:
         print(f"\n   Confirm with: auto-evolve.py confirm")
@@ -2063,29 +2555,21 @@ def cmd_scan(args) -> int:
 
 
 def cmd_confirm(args) -> int:
-    """Confirm and execute pending changes in semi-auto mode."""
     config = load_config()
     iteration_id = args.iteration_id
 
-    # Find iteration
     catalog = load_catalog()
     if not catalog["iterations"]:
         print("No iterations found.")
         return 1
 
     if iteration_id:
-        target_iter = next(
-            (i for i in catalog["iterations"] if i["version"] == iteration_id),
-            None,
-        )
+        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
         if not target_iter:
             print(f"Iteration {iteration_id} not found.")
             return 1
     else:
-        target_iter = next(
-            (i for i in catalog["iterations"] if i["status"] == "pending-approval"),
-            None,
-        )
+        target_iter = next((i for i in catalog["iterations"] if i["status"] == "pending-approval"), None)
         if not target_iter:
             print("No pending-approval iteration found.")
             return 1
@@ -2112,7 +2596,6 @@ def cmd_confirm(args) -> int:
         repo_obj = Repository(path=rp, type="skill")
         if not repo_obj.resolve_path().exists():
             continue
-
         repo_items = [p for p in pending_items if p.get("repo_path") == rp]
         for p in repo_items:
             try:
@@ -2120,8 +2603,6 @@ def cmd_confirm(args) -> int:
                 commit_hash = git_commit(repo_obj, commit_msg)
                 print(f"  ✅ [{p['id']}] {p['description'][:60]} ({commit_hash})")
                 confirmed_count += 1
-
-                # Record approval in learnings
                 add_learning(
                     learning_type="approval",
                     change_id=str(p["id"]),
@@ -2133,7 +2614,17 @@ def cmd_confirm(args) -> int:
             except Exception as e:
                 print(f"  ❌ [{p['id']}] {p['description'][:60]}: {e}")
 
-    # Push
+    # v3.1: Issue linking after confirm
+    if confirmed_count > 0:
+        issue_linker = IssueLinker()
+        for rp in repos_affected:
+            repo_path = Path(rp)
+            repo_changed = [g["file"] for g in git_status(Repository(path=rp, type="skill"))]
+            if repo_changed:
+                close_result = issue_linker.close_related_issues(repo_path, repo_changed, iteration_id)
+                if close_result["found"] > 0:
+                    print(f"\n  🔗 IssueLinker: closed {close_result['closed']} of {close_result['found']} related issue(s)")
+
     for rp in repos_affected:
         repo_obj = Repository(path=rp, type="skill")
         try:
@@ -2141,12 +2632,9 @@ def cmd_confirm(args) -> int:
         except Exception as e:
             print(f"  ⚠️  Push failed for {rp}: {e}")
 
-    # Update manifest
     manifest_data["items_approved"] = confirmed_count
     manifest_data["status"] = "completed"
-    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(
-        json.dumps(manifest_data, indent=2)
-    )
+    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
 
     for i, cat_iter in enumerate(catalog["iterations"]):
         if cat_iter["version"] == iteration_id:
@@ -2160,27 +2648,19 @@ def cmd_confirm(args) -> int:
 
 
 def cmd_reject(args) -> int:
-    """Reject a pending change and record in learnings."""
     change_id = args.id
     reason = args.reason
     iteration_id = args.iteration_id
 
     catalog = load_catalog()
 
-    # Find target iteration
     if iteration_id:
-        target_iter = next(
-            (i for i in catalog["iterations"] if i["version"] == iteration_id),
-            None,
-        )
+        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
         if not target_iter:
             print(f"Iteration {iteration_id} not found.")
             return 1
     else:
-        target_iter = next(
-            (i for i in catalog["iterations"] if i["status"] == "pending-approval"),
-            None,
-        )
+        target_iter = next((i for i in catalog["iterations"] if i["status"] == "pending-approval"), None)
         if not target_iter:
             print("No pending-approval iteration found.")
             return 1
@@ -2194,13 +2674,11 @@ def cmd_reject(args) -> int:
         print(f"Iteration {iteration_id} manifest not found.")
         return 1
 
-    # Find the item
     item = next((p for p in pending_items if p.get("id") == change_id), None)
     if not item:
         print(f"Item {change_id} not found in pending items.")
         return 1
 
-    # Record rejection
     add_learning(
         learning_type="rejection",
         change_id=str(change_id),
@@ -2209,15 +2687,12 @@ def cmd_reject(args) -> int:
         repo=item.get("repo_path", ""),
     )
 
-    # Remove from pending
     pending_items = [p for p in pending_items if p.get("id") != change_id]
     save_pending_review(iteration_id, pending_items)
 
     manifest_data["items_pending_approval"] = pending_items
     manifest_data["items_rejected"] = manifest_data.get("items_rejected", 0) + 1
-    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(
-        json.dumps(manifest_data, indent=2)
-    )
+    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
 
     print(f"❌ Rejected item {change_id}: {item['description'][:60]}")
     if reason:
@@ -2228,10 +2703,6 @@ def cmd_reject(args) -> int:
 
 
 def cmd_approve(args) -> int:
-    """
-    v3.0: Approve and execute pending changes.
-    Now supports --reason flag for recording approval rationale.
-    """
     config = load_config()
     iteration_id = args.iteration_id
     approve_all = args.all
@@ -2243,17 +2714,13 @@ def cmd_approve(args) -> int:
         return 1
 
     if iteration_id:
-        target_iter = next(
-            (i for i in catalog["iterations"] if i["version"] == iteration_id),
-            None,
-        )
+        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
         if not target_iter:
             print(f"Iteration {iteration_id} not found.")
             return 1
     else:
         target_iter = next(
-            (i for i in catalog["iterations"]
-             if i["status"] in ("pending-approval", "full-auto-completed")),
+            (i for i in catalog["iterations"] if i["status"] in ("pending-approval", "full-auto-completed")),
             None,
         )
         if not target_iter:
@@ -2299,27 +2766,21 @@ def cmd_approve(args) -> int:
             print("Or:  auto-evolve.py approve 1,3 [--reason 'your reason']")
             return 0
 
-    # v3.0: Check if we should batch-merge PRs
-    changes_for_pr = [
-        p for p in pending_items
-        if p["id"] in approved_ids and p.get("risk") == "high"
-    ]
-
+    changes_for_pr = [p for p in pending_items if p["id"] in approved_ids and p.get("risk") == "high"]
     if len(changes_for_pr) >= 3 and should_merge_prs(changes_for_pr):
         print(f"\n📦 Batch-merging {len(changes_for_pr)} high-risk changes into single PR...")
         groups = group_similar_changes(changes_for_pr)
         print(f"   Created {len(groups)} change group(s)")
 
-    # Execute approved changes
     approved_count = 0
     repos_affected: set[str] = set()
+    issue_linker = IssueLinker()
 
     for p in pending_items:
         if p["id"] not in approved_ids:
             continue
 
         repo_obj = Repository(path=p["repo_path"], type=p.get("repo_type", "skill"))
-
         if not repo_obj.resolve_path().exists():
             print(f"  ⚠️  Repo not found: {repo_obj.path}")
             continue
@@ -2328,10 +2789,7 @@ def cmd_approve(args) -> int:
             print(f"\n🔴 High-risk: {p['description'][:60]}")
             print(f"  Creating branch and PR...")
             branch = create_branch_for_change(repo_obj, p["description"][:50])
-
-            # v3.0: Handle potential conflicts
             conflict_result = handle_pr_conflict(repo_obj, branch)
-
             try:
                 commit_hash = git_commit(repo_obj, f"auto-evolve: {p['description']}")
                 pr_body = f"## auto-evolve: {p['description']}\n\n### Changes\n\n- {p['description']}"
@@ -2351,16 +2809,13 @@ def cmd_approve(args) -> int:
                 )
                 print(f"  ✅ Branch: {branch}")
                 print(f"  ✅ Commit: {commit_hash}")
-
                 if conflict_result == "auto_resolved":
                     print(f"  🔧 Conflicts auto-resolved during rebase")
                 elif conflict_result == "manual_required":
                     print(f"  ⚠️  Conflicts require manual resolution")
-
                 print(f"  🔗 {pr_url}")
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
-
             approved_count += 1
             repos_affected.add(p["repo_path"])
         else:
@@ -2369,8 +2824,6 @@ def cmd_approve(args) -> int:
                 print(f"  ✅ [{p['id']}] {p['description'][:60]} ({commit_hash})")
                 approved_count += 1
                 repos_affected.add(p["repo_path"])
-
-                # v3.0: Record with approval reason
                 add_learning(
                     learning_type="approval",
                     change_id=str(p["id"]),
@@ -2379,10 +2832,15 @@ def cmd_approve(args) -> int:
                     repo=repo_obj.path,
                     approved_by="user",
                 )
+
+                # v3.1: Auto-close related issues for low/medium risk approved changes
+                repo_changed = [p.get("file_path", "")]
+                close_result = issue_linker.close_related_issues(repo_obj.resolve_path(), repo_changed, iteration_id)
+                if close_result["found"] > 0:
+                    print(f"  🔗 IssueLinker: closed {close_result['closed']} of {close_result['found']} related issue(s)")
             except Exception as e:
                 print(f"  ❌ [{p['id']}] {p['description'][:60]}: {e}")
 
-    # Push
     if approved_count > 0:
         for rp in repos_affected:
             repo_obj = Repository(path=rp, type="skill")
@@ -2391,12 +2849,9 @@ def cmd_approve(args) -> int:
             except Exception as e:
                 print(f"  ⚠️  Push failed for {rp}: {e}")
 
-    # Update manifest
     manifest_data["items_approved"] = approved_count
     manifest_data["status"] = "completed"
-    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(
-        json.dumps(manifest_data, indent=2)
-    )
+    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
 
     for i, cat_iter in enumerate(catalog["iterations"]):
         if cat_iter["version"] == iteration_id:
@@ -2416,21 +2871,12 @@ def create_branch_for_change(repo: Repository, change_desc: str) -> str:
     return branch_name
 
 
-def create_pr(
-    repo: Repository,
-    branch_name: str,
-    description: str,
-    changes: list[ChangeItem],
-    extra_body: Optional[str] = None,
-) -> str:
-    """Create a GitHub PR using gh CLI."""
+def create_pr(repo: Repository, branch_name: str, description: str, changes: list[ChangeItem], extra_body: Optional[str] = None) -> str:
     result = git_run(repo, "remote", "get-url", "origin", check=False)
     remote_url = result.stdout.strip()
-
     match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", remote_url)
     if not match:
         return f"Branch created: {branch_name} (PR creation requires gh CLI and GitHub remote)"
-
     repo_slug = match.group(1)
 
     pr_body_lines = [
@@ -2441,10 +2887,8 @@ def create_pr(
     ]
     for c in changes:
         pr_body_lines.append(f"- **{c.risk.value}** {c.description} (`{c.file_path}`)")
-
     if extra_body:
         pr_body_lines.extend(["", extra_body])
-
     pr_body_lines.extend([
         "",
         "### Approval",
@@ -2454,7 +2898,6 @@ def create_pr(
         "auto-evolve.py approve",
         "```",
     ])
-
     pr_body = "\n".join(pr_body_lines)
 
     result = subprocess.run(
@@ -2470,32 +2913,26 @@ def create_pr(
         capture_output=True,
         text=True,
     )
-
     if result.returncode != 0:
         return f"Branch {branch_name} created. PR creation failed: {result.stderr.strip()}"
-
     return result.stdout.strip()
 
 
 def cmd_repo_add(args) -> int:
     config = load_config()
     repos = config_to_repos(config)
-
     repo_path = Path(args.path).expanduser().resolve()
     if not repo_path.exists():
         print(f"❌ Repository not found: {repo_path}")
         return 1
-
     repo_type = args.type or "skill"
     if repo_type not in REPO_TYPES:
         print(f"Invalid type. Must be one of: {', '.join(REPO_TYPES)}")
         return 1
-
     for r in repos:
         if Path(r.path).resolve() == repo_path:
             print(f"Repository already monitored: {repo_path}")
             return 0
-
     new_repo = Repository(
         path=str(repo_path),
         type=repo_type,
@@ -2503,10 +2940,8 @@ def cmd_repo_add(args) -> int:
         auto_monitor=True,
     )
     repos.append(new_repo)
-
     config = repos_to_config(repos, config)
     save_config(config)
-
     print(f"✅ Added repository: {repo_path}")
     print(f"   Type: {repo_type}")
     print(f"   Auto-monitor: True")
@@ -2516,12 +2951,10 @@ def cmd_repo_add(args) -> int:
 def cmd_repo_list(args) -> int:
     config = load_config()
     repos = config_to_repos(config)
-
     if not repos:
         print("No repositories configured.")
         print("Run: auto-evolve.py repo-add <path> --type <type>")
         return 0
-
     print("📦 Configured Repositories:")
     print("=" * 50)
     for i, r in enumerate(repos, 1):
@@ -2529,23 +2962,21 @@ def cmd_repo_list(args) -> int:
         mon = "🟢" if r.auto_monitor else "⏭️"
         vis = "🔒" if r.is_closed() else "🌐"
         print(f"{i}. {exists} {mon} {vis} {r.path}")
-        langs = ""
-        if r.resolve_path().exists():
-            det = detect_repo_languages(r.resolve_path())
-            if det: langs = " | Langs: " + ", ".join(sorted(det))
         print(f"   Type: {r.type} | Visibility: {r.visibility}")
-        print(f"   Auto-monitor: {r.auto_monitor}" + langs)
+        print(f"   Auto-monitor: {r.auto_monitor} | Scan interval: {r.scan_interval_hours}h")
         if r.risk_override:
             print(f"   Risk override: {r.risk_override}")
+        if r.resolve_path().exists():
+            det = detect_repo_languages(r.resolve_path())
+            if det:
+                print(f"   Languages: {', '.join(sorted(det))}")
         print()
-
     return 0
 
 
 def cmd_rollback(args) -> int:
-    """Rollback to a previous iteration. Supports cherry-pick (v3.0)."""
     version = args.to
-    item_id = getattr(args, 'item', None)
+    item_id = getattr(args, "item", None)
     reason = args.reason or "User-initiated rollback"
 
     catalog = load_catalog()
@@ -2573,23 +3004,22 @@ def cmd_rollback(args) -> int:
         repos_affected.setdefault(rp, []).append(item)
 
     reverted = 0
-    for repo_path, repo_items in repos_affected.items():
-        repo_obj = Repository(path=repo_path, type="skill")
+    for repo_path_str, repo_items in repos_affected.items():
+        repo_obj = Repository(path=repo_path_str, type="skill")
         if not repo_obj.resolve_path().exists():
-            print(f"  ⚠️  Repo not found: {repo_path}")
+            print(f"  ⚠️  Repo not found: {repo_path_str}")
             continue
 
-        # v3.0: Cherry-pick mode - only revert specific item
         items_to_revert = repo_items
         if item_id is not None:
             items_to_revert = [i for i in repo_items if i.get("id") == item_id]
             if not items_to_revert:
-                print(f"  Item " + str(item_id) + " not found in " + repo_path)
+                print(f"  Item {item_id} not found in {repo_path_str}")
                 continue
 
         try:
             commits = git_log(repo_obj, limit=len(repo_items) + 1)
-            for commit in commits[: len(repo_items)]:
+            for commit in commits[: len(items_to_revert)]:
                 try:
                     git_revert(repo_obj, commit["hash"])
                     print(f"  ✅ Reverted: {commit['message'][:60]}")
@@ -2597,7 +3027,7 @@ def cmd_rollback(args) -> int:
                 except Exception as e:
                     print(f"  ⚠️  Could not revert {commit['hash']}: {e}")
         except Exception as e:
-            print(f"  ❌ Git error for {repo_path}: {e}")
+            print(f"  ❌ Git error for {repo_path_str}: {e}")
 
     manifest = IterationManifest(
         version=rollback_iter_id,
@@ -2627,39 +3057,46 @@ def cmd_rollback(args) -> int:
     print(f"\n✅ Rollback complete: {rollback_iter_id}")
     print(f"   Reverted: {reverted} items from {version}")
     if item_id is not None:
-        print(f"   (cherry-pick: only item #" + str(item_id) + ")")
+        print(f"   (cherry-pick: only item #{item_id})")
     return 0
 
 
 def cmd_release(args) -> int:
-    """Create a GitHub release (v3.0)."""
     version = args.version
     changelog = args.changelog or ""
     config = load_config()
     repos = config_to_repos(config)
-    if not repos: print("No repositories configured."); return 1
-    if len(repos) > 1: print("Multiple repos -- creating release for first repo.")
+    if not repos:
+        print("No repositories configured.")
+        return 1
+    if len(repos) > 1:
+        print("Multiple repos -- creating release for first repo.")
     repo = repos[0]
-    if not repo.resolve_path().exists(): print("Repository not found: " + repo.path); return 1
+    if not repo.resolve_path().exists():
+        print("Repository not found: " + repo.path)
+        return 1
     print("Creating release v" + version.lstrip("v") + " for " + repo.path + "...")
     try:
         create_release(repo, version, changelog)
         print("Release v" + version.lstrip("v") + " created successfully")
     except Exception as e:
-        print("Release failed: " + str(e)); return 1
+        print("Release failed: " + str(e))
+        return 1
     return 0
 
 
 def cmd_schedule(args) -> int:
     """
-    v3.0: Schedule management — integrates with OpenClaw cron.
-
-    --every: Set interval and attempt to create cron via openclaw CLI
-    --show:  Show current schedule
+    v3.1: Schedule management with smart scheduling.
+    --suggest: Show activity-based scheduling recommendations
+    --auto: Apply recommendations to config
+    --every: Set interval (creates cron)
+    --show: Show current schedule
     --remove: Remove cron job
     """
+    config = load_config()
+
     if args.remove:
-        # v3.0: Try to actually remove the cron
         removed = remove_cron()
         if removed:
             print("✅ Cron job removed via openclaw CLI.")
@@ -2671,7 +3108,6 @@ def cmd_schedule(args) -> int:
         return 0
 
     if args.show:
-        config = load_config()
         interval = config.get("schedule_interval_hours", 168)
         cron_id = config.get("schedule_cron_id")
         print("# Auto-Evolve Schedule Configuration")
@@ -2684,21 +3120,62 @@ def cmd_schedule(args) -> int:
         print(f"#   auto-evolve.py schedule --every {interval}")
         return 0
 
+    if args.suggest:
+        # v3.1: Smart scheduling suggestions
+        scheduler = SmartScheduler(config)
+        suggestions = scheduler.suggest_schedule()
+        if not suggestions:
+            print("No repositories configured.")
+            return 0
+        print("📊 Smart Schedule Suggestions")
+        print("=" * 60)
+        activity_icons = {
+            "very_active": "🔥",
+            "active": "⚡",
+            "normal": "📅",
+            "idle": "💤",
+        }
+        for path, sug in suggestions.items():
+            icon = activity_icons.get(sug["activity"], "📦")
+            action_icon = {"increase": "⬆️", "decrease": "⬇️", "maintain": "➡️"}.get(sug["action"], "➡️")
+            print(f"\n{icon} {sug['name']} ({path})")
+            print(f"   Activity: {sug['activity']} ({sug['commits_last_7_days']} commits/7d)")
+            print(f"   Current interval:  {sug['current_interval_hours']}h")
+            print(f"   Recommended:       {sug['recommended_interval_hours']}h {action_icon}")
+            if sug["change_hours"] != 0:
+                print(f"   → Change by {abs(sug['change_hours'])}h ({sug['action']})")
+        print("\n💡 Apply with: auto-evolve.py schedule --auto")
+        return 0
+
+    if args.auto:
+        # v3.1: Auto-apply scheduling recommendations
+        scheduler = SmartScheduler(config)
+        suggestions = scheduler.suggest_schedule()
+        if not suggestions:
+            print("No repositories configured.")
+            return 0
+        updates: dict[str, int] = {}
+        for path, sug in suggestions.items():
+            if sug["action"] != "maintain":
+                updates[path] = sug["recommended_interval_hours"]
+        if not updates:
+            print("✅ All repositories already at recommended intervals.")
+            return 0
+        result = scheduler.apply_schedule(updates)
+        print("✅ Applied schedule changes:")
+        for a in result["applied"]:
+            print(f"   {a['path']}: {a['old_interval']}h → {a['new_interval']}h")
+        return 0
+
     if args.every:
         interval = args.every
         if interval < 1:
             print("❌ Interval must be at least 1 hour.")
             return 1
-
-        config = load_config()
         config["schedule_interval_hours"] = interval
         save_config(config)
-
         print(f"✅ Schedule interval set to {interval} hour(s)")
-
-        # v3.0: Try to create cron via openclaw CLI
         cron_created = setup_cron(interval)
-
         if cron_created:
             print(f"✅ Cron job created via openclaw CLI (ID: {config.get('schedule_cron_id', 'unknown')})")
         else:
@@ -2709,25 +3186,24 @@ def cmd_schedule(args) -> int:
             print(f"    --message 'exec python3 {SKILL_DIR}/scripts/auto-evolve.py scan'")
         return 0
 
-    # No subcommand: show help
+    # No subcommand
     print("auto-evolve.py schedule --every HOURS   Set scan interval (creates cron)")
-    print("auto-evolve.py schedule --show           Show current schedule")
-    print("auto-evolve.py schedule --remove         Remove cron job")
+    print("auto-evolve.py schedule --suggest        Smart scheduling recommendations (v3.1)")
+    print("auto-evolve.py schedule --auto           Apply recommended intervals (v3.1)")
+    print("auto-evolve.py schedule --show            Show current schedule")
+    print("auto-evolve.py schedule --remove          Remove cron job")
     return 0
 
 
 def cmd_set_mode(args) -> int:
-    """Set operation mode (semi-auto or full-auto)."""
     mode = args.mode
     if mode not in ("semi-auto", "full-auto"):
         print(f"❌ Invalid mode. Must be 'semi-auto' or 'full-auto'.")
         return 1
-
     config = load_config()
     old_mode = config.get("mode", "semi-auto")
     config["mode"] = mode
     save_config(config)
-
     mode_desc = {
         "semi-auto": "semi-auto (confirm before execution)",
         "full-auto": "full-auto (execute per rules)",
@@ -2738,10 +3214,8 @@ def cmd_set_mode(args) -> int:
 
 
 def cmd_set_rules(args) -> int:
-    """Set full-auto execution rules."""
     config = load_config()
     rules = config.get("full_auto_rules", {})
-
     rules["execute_low_risk"] = (
         args.low if args.low is not None else rules.get("execute_low_risk", True)
     )
@@ -2751,10 +3225,8 @@ def cmd_set_rules(args) -> int:
     rules["execute_high_risk"] = (
         args.high if args.high is not None else rules.get("execute_high_risk", False)
     )
-
     config["full_auto_rules"] = rules
     save_config(config)
-
     print("✅ Full-auto rules updated:")
     print(f"   execute_low_risk:    {rules['execute_low_risk']}")
     print(f"   execute_medium_risk: {rules['execute_medium_risk']}")
@@ -2763,7 +3235,6 @@ def cmd_set_rules(args) -> int:
 
 
 def cmd_learnings(args) -> int:
-    """Show learning history (v3.0: approvals show reason)."""
     data = load_learnings()
 
     if args.type == "rejections" or args.type is None:
@@ -2797,7 +3268,6 @@ def cmd_learnings(args) -> int:
     if args.type not in ("rejections", "approvals", None):
         print(f"❌ Unknown type: {args.type}. Use --type rejections or --type approvals.")
         return 1
-
     return 0
 
 
@@ -2806,7 +3276,6 @@ def cmd_log(args) -> int:
     if not catalog["iterations"]:
         print("No iterations recorded yet.")
         return 0
-
     print("📚 Iteration Log")
     print("=" * 50)
     limit = args.limit or 10
@@ -2820,8 +3289,12 @@ def cmd_log(args) -> int:
         }.get(iteration["status"], "❓")
 
         alert_flag = " 🚨" if iteration.get("has_alert") else ""
-        metrics_flag = " 📊" if iteration.get("metrics_id") else ""
-        print(f"\n{status_icon} {iteration['version']}{alert_flag}{metrics_flag}")
+        cost_str = ""
+        if iteration.get("total_cost_usd"):
+            cost_str = f" 💰${iteration['total_cost_usd']:.4f}"
+        llm_str = f" 🤖{iteration.get('llm_calls', 0)}calls" if iteration.get("llm_calls", 0) > 0 else ""
+
+        print(f"\n{status_icon} {iteration['version']}{alert_flag}{cost_str}{llm_str}")
         print(f"   Date: {iteration['date']}")
         print(f"   Status: {iteration['status']}")
         print(f"   Risk: {iteration.get('risk_level', 'unknown')}")
@@ -2835,7 +3308,108 @@ def cmd_log(args) -> int:
             print(f"   Rolled back: {iteration['rollback_of']}")
         if iteration.get("has_alert"):
             print(f"   🚨 Alert: quality gate failed")
+    return 0
 
+
+# ===========================================================
+# v3.1: effects command
+# ===========================================================
+
+def cmd_effects(args) -> int:
+    """Show effect tracking reports for iterations."""
+    iteration_id = args.iteration_id
+
+    catalog = load_catalog()
+    if not catalog["iterations"]:
+        print("No iterations found.")
+        return 0
+
+    if iteration_id:
+        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
+        if not target_iter:
+            print(f"Iteration {iteration_id} not found.")
+            return 1
+        iteration_ids = [iteration_id]
+    else:
+        iteration_ids = [i["version"] for i in catalog["iterations"][: args.limit or 5]]
+
+    for iid in iteration_ids:
+        effect_file = ITERATIONS_DIR / iid / "effect.json"
+        if not effect_file.exists():
+            continue
+        effect = json.loads(effect_file.read_text())
+        verdict_icon = {"positive": "✅", "neutral": "➖", "negative": "❌"}.get(effect["verdict"], "➖")
+        print(f"\n{verdict_icon} Iteration {iid} — {effect['verdict'].upper()}")
+        print(f"   Date: {effect['date']}")
+        print(f"   Summary: {effect['summary']}")
+        totals = effect.get("totals", {})
+        if totals.get("todos_resolved"):
+            print(f"   TODOs resolved: {totals['todos_resolved']}")
+        if totals.get("coverage_delta"):
+            print(f"   Coverage delta: {totals['coverage_delta']:+.1f}%")
+        if totals.get("duplicate_lines_delta"):
+            print(f"   Duplicate lines: {totals['duplicate_lines_delta']:+,}")
+        if totals.get("code_lines_delta"):
+            print(f"   Code lines: {totals['code_lines_delta']:+,}")
+
+    if not iteration_ids:
+        print("No effect reports found. Run a scan first.")
+    return 0
+
+
+# ===========================================================
+# v3.1: costs command
+# ===========================================================
+
+def cmd_costs(args) -> int:
+    """Show LLM cost tracking for iterations."""
+    iteration_id = args.iteration_id
+
+    catalog = load_catalog()
+    if not catalog["iterations"]:
+        print("No iterations found.")
+        return 0
+
+    if iteration_id:
+        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
+        if not target_iter:
+            print(f"Iteration {iteration_id} not found.")
+            return 1
+        iteration_ids = [iteration_id]
+    else:
+        iteration_ids = [i["version"] for i in catalog["iterations"][: args.limit or 5]]
+
+    cost_tracker = CostTracker()
+    total_all = 0.0
+    total_calls = 0
+
+    for iid in iteration_ids:
+        cost_summary = cost_tracker.get_iteration_cost(iid)
+        if cost_summary["total_calls"] == 0:
+            continue
+        total_all += cost_summary["total_cost_usd"]
+        total_calls += cost_summary["total_calls"]
+        print(f"\n💰 Iteration {iid}")
+        print(f"   Calls: {cost_summary['total_calls']}")
+        print(f"   Tokens: {cost_summary['total_tokens']:,}")
+        print(f"   Cost: ${cost_summary['total_cost_usd']:.6f}")
+
+        # Show per-model breakdown
+        calls = cost_tracker.load_calls(iid)
+        by_model: dict[str, dict] = {}
+        for call in calls:
+            model = call["model"]
+            by_model.setdefault(model, {"calls": 0, "tokens": 0, "cost": 0.0})
+            by_model[model]["calls"] += 1
+            by_model[model]["tokens"] += call["total_tokens"]
+            by_model[model]["cost"] += call["estimated_cost_usd"]
+        for model, stats in by_model.items():
+            print(f"   [{model}] {stats['calls']} calls, {stats['tokens']:,} tokens, ${stats['cost']:.6f}")
+
+    if total_calls == 0:
+        print("No LLM costs recorded. Run a scan with LLM analysis.")
+    else:
+        print(f"\n💰 TOTAL: {total_calls} calls, ${total_all:.6f}")
     return 0
 
 
@@ -2845,7 +3419,7 @@ def cmd_log(args) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Auto-Evolve v3.0 — LLM-driven automated skill iteration manager",
+        description="Auto-Evolve v3.1 — LLM-driven automated skill iteration manager",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2864,83 +3438,70 @@ def main() -> int:
     reject_p.add_argument("--reason", type=str, help="Rejection reason")
     reject_p.add_argument("--iteration", dest="iteration_id", type=str, help="Iteration ID")
 
-    # approve (v3.0: --reason flag added)
+    # approve
     approve_p = subparsers.add_parser("approve", help="Approve pending changes")
     approve_p.add_argument("--all", action="store_true", help="Approve all pending items")
     approve_p.add_argument("--ids", type=str, help="Comma-separated IDs (e.g. 1,2,3)")
     approve_p.add_argument("ids", nargs="?", type=str, help="IDs to approve (positional)")
-    approve_p.add_argument(
-        "--iteration", dest="iteration_id", type=str, help="Iteration ID"
-    )
-    approve_p.add_argument(
-        "--reason", type=str,
-        help="Reason for approval (recorded in learnings)",
-    )
+    approve_p.add_argument("--iteration", dest="iteration_id", type=str, help="Iteration ID")
+    approve_p.add_argument("--reason", type=str, help="Reason for approval (recorded in learnings)")
 
     # repo-add
     repo_add_p = subparsers.add_parser("repo-add", help="Add a repository to monitor")
     repo_add_p.add_argument("path", type=str, help="Repository path")
     repo_add_p.add_argument("--type", type=str, choices=REPO_TYPES, help="Repository type")
-    repo_add_p.add_argument(
-        "--monitor", action="store_true", default=True, help="Enable auto-monitor"
-    )
+    repo_add_p.add_argument("--monitor", action="store_true", default=True, help="Enable auto-monitor")
 
     # repo-list
     subparsers.add_parser("repo-list", help="List configured repositories")
 
-    # rollback (v3.0: --item for cherry-pick)
+    # rollback
     rollback_p = subparsers.add_parser("rollback", help="Rollback to a previous iteration")
     rollback_p.add_argument("--to", required=True, dest="to", type=str, help="Target version")
     rollback_p.add_argument("--reason", type=str, help="Rollback reason")
-    rollback_p.add_argument(
-        "--item", type=int, dest="item",
-        help="Cherry-pick: only rollback specific item ID (v3.0)"
-    )
-    rollback_p.set_defaults(item=None)
+    rollback_p.add_argument("--item", type=int, dest="item", help="Cherry-pick: only rollback specific item ID")
 
-    # release (v3.0)
-    release_p = subparsers.add_parser("release", help="Create a GitHub release (v3.0)")
+    # release
+    release_p = subparsers.add_parser("release", help="Create a GitHub release")
     release_p.add_argument("--version", required=True, dest="version", type=str, help="Version tag (e.g. 2.3.0)")
     release_p.add_argument("--changelog", type=str, default="", help="Changelog / release notes")
 
-    # schedule
+    # schedule (v3.1: added --suggest and --auto)
     schedule_p = subparsers.add_parser("schedule", help="Schedule management (cron setup)")
     schedule_p.add_argument("--every", type=int, help="Set scan interval in hours")
+    schedule_p.add_argument("--suggest", action="store_true", help="Smart scheduling recommendations (v3.1)")
+    schedule_p.add_argument("--auto", action="store_true", help="Apply recommended intervals (v3.1)")
     schedule_p.add_argument("--show", action="store_true", help="Show current schedule")
     schedule_p.add_argument("--remove", action="store_true", help="Remove cron job")
 
     # set-mode
     set_mode_p = subparsers.add_parser("set-mode", help="Set operation mode")
-    set_mode_p.add_argument(
-        "mode", type=str, choices=["semi-auto", "full-auto"], help="Mode"
-    )
+    set_mode_p.add_argument("mode", type=str, choices=["semi-auto", "full-auto"], help="Mode")
 
     # set-rules
     set_rules_p = subparsers.add_parser("set-rules", help="Set full-auto execution rules")
-    set_rules_p.add_argument(
-        "--low", type=lambda x: x.lower() == "true",
-        help="Execute low-risk (true/false)",
-    )
-    set_rules_p.add_argument(
-        "--medium", type=lambda x: x.lower() == "true",
-        help="Execute medium-risk (true/false)",
-    )
-    set_rules_p.add_argument(
-        "--high", type=lambda x: x.lower() == "true",
-        help="Execute high-risk (true/false)",
-    )
+    set_rules_p.add_argument("--low", type=lambda x: x.lower() == "true", help="Execute low-risk (true/false)")
+    set_rules_p.add_argument("--medium", type=lambda x: x.lower() == "true", help="Execute medium-risk (true/false)")
+    set_rules_p.add_argument("--high", type=lambda x: x.lower() == "true", help="Execute high-risk (true/false)")
 
     # learnings
     learnings_p = subparsers.add_parser("learnings", help="Show learning history")
-    learnings_p.add_argument(
-        "--type", type=str, choices=["rejections", "approvals"],
-        help="Filter by type",
-    )
+    learnings_p.add_argument("--type", type=str, choices=["rejections", "approvals"], help="Filter by type")
     learnings_p.add_argument("--limit", type=int, default=20, help="Limit entries")
 
     # log
     log_p = subparsers.add_parser("log", help="Show iteration log")
     log_p.add_argument("--limit", type=int, default=10, help="Limit entries")
+
+    # effects (v3.1)
+    effects_p = subparsers.add_parser("effects", help="Show effect tracking reports (v3.1)")
+    effects_p.add_argument("--iteration", dest="iteration_id", type=str, help="Specific iteration ID")
+    effects_p.add_argument("--limit", type=int, default=5, help="Limit iterations shown")
+
+    # costs (v3.1)
+    costs_p = subparsers.add_parser("costs", help="Show LLM cost tracking (v3.1)")
+    costs_p.add_argument("--iteration", dest="iteration_id", type=str, help="Specific iteration ID")
+    costs_p.add_argument("--limit", type=int, default=5, help="Limit iterations shown")
 
     args = parser.parse_args()
 
@@ -2958,6 +3519,8 @@ def main() -> int:
         "set-rules": cmd_set_rules,
         "learnings": cmd_learnings,
         "log": cmd_log,
+        "effects": cmd_effects,
+        "costs": cmd_costs,
     }
 
     return commands[args.command](args)

@@ -2,6 +2,48 @@
 
 All notable changes to auto-evolve are documented here.
 
+## [3.1.0] -- 2026-04-05
+
+### New Features
+
+- **EffectTracker:** `EffectTracker` class compares before/after snapshots of code quality metrics. Tracks: TODO/FIXME count, code lines, function count, duplicate lines, lint errors. Generates `effect.json` per iteration with verdict (positive/neutral/negative). Called automatically after each scan when changes are committed. `auto-evolve.py effects` command to inspect reports.
+
+- **CostTracker:** `CostTracker` class records each LLM call with prompt/completion token counts and estimated USD cost using `LLM_PRICING` table (MiniMax-M2, GPT-4, GPT-4o, GPT-4o-mini, Claude 3.5 Sonnet, Claude 3 Opus). Calls saved to `llm_calls.jsonl` per iteration. Aggregated cost stored in `catalog.json` (`total_cost_usd`, `llm_calls`). `auto-evolve.py costs` command to view breakdowns.
+
+- **IssueLinker:** `IssueLinker` class uses `gh issue list --json` to find open issues referencing changed files (by filename match in title/body). After each commit (auto or approved), `close_related_issues()` adds a comment and closes with reason `completed`. Integrated into `cmd_scan` (full-auto), `cmd_confirm`, and `cmd_approve`.
+
+- **SmartScheduler:** `SmartScheduler` class assesses repo activity by counting commits in last 7 days. Thresholds: very_active (≥20, →24h), active (≥10, →72h), normal (≥3, →168h), idle (<3, →336h). `schedule --suggest` shows per-repo recommendations. `schedule --auto` applies them to config. Per-repo `scan_interval_hours` field added to `Repository` dataclass and config schema.
+
+- **`effects` command:** `cmd_effects()` displays effect tracking reports for recent iterations. Shows verdict, summary, and delta values. `--iteration` flag for specific iteration.
+
+- **`costs` command:** `cmd_costs()` displays LLM cost breakdown by iteration and model. Shows per-model call count, token count, and cost. `--iteration` flag for specific iteration.
+
+- **Schedule `--suggest` and `--auto`:** New subcommands for smart scheduling. `--suggest` prints activity assessment and recommended intervals. `--auto` applies changes to config.
+
+### Changed
+
+- **Log output:** Shows 💰 cost and 🤖 LLM call count per iteration.
+- **Repository config:** Added `scan_interval_hours` field per repository.
+- **Iteration manifest:** Added `total_cost_usd` and `llm_calls` fields.
+- **Catalog:** Added `total_cost_usd` and `llm_calls` per iteration entry.
+- **`scan` output:** Shows effect verdict after scan completes.
+- **`confirm` and `approve`:** Call IssueLinker to auto-close related issues after commit.
+
+### Internal
+
+- `LLM_PRICING` constant with per-model input/output pricing
+- `EffectTracker` class with `snapshot()`, `track_iteration_effect()` methods
+- `CostTracker` class with `track_llm_call()`, `get_iteration_cost()`, `load_calls()`, `flush_calls()` methods
+- `IssueLinker` class with `find_related_issues()`, `close_issue()`, `close_related_issues()` methods
+- `SmartScheduler` class with `assess_activity()`, `get_recommended_interval()`, `get_activity_stats()`, `suggest_schedule()`, `apply_schedule()` methods
+- `run_llm_analysis_on_changes()` accepts optional `CostTracker` to track LLM costs
+- `run_scan()` returns 4-tuple including `after_snapshots` for effect tracking
+- `cmd_effects()`, `cmd_costs()` commands
+- `Repository.scan_interval_hours` field added
+- `IterationManifest.total_cost_usd` and `llm_calls` fields added
+
+---
+
 ## [3.0.0] -- 2026-04-05
 
 ### New Features

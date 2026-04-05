@@ -1,4 +1,4 @@
-# Auto-Evolve v3.0
+# Auto-Evolve v3.1
 
 **LLM-driven automated skill iteration manager with full audit trail.**
 
@@ -8,7 +8,7 @@
 
 ## Overview
 
-Auto-Evolve v3.0 adds LLM-powered code analysis, dependency awareness, multi-language support, and more.
+Auto-Evolve v3.1 adds effect tracking, LLM cost tracking, GitHub issue auto-closing, and smart activity-based scheduling.
 
 ```
 Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode Decision
@@ -18,7 +18,7 @@ Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode 
               refactoring hints
 ```
 
-### v3.0 New Features
+### v3.1 New Features
 
 - **LLM-driven code analysis** -- uses OpenClaw configured LLM (no separate API key)
 - **Dependency awareness** -- tracks which files depend on changed files
@@ -27,6 +27,15 @@ Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode 
 - **Multi-language support** -- Python, JavaScript, TypeScript, Go, Shell, Java
 - **Release management** -- `release --version 2.3.0` creates git tag + GitHub release
 - **Contributor tracking** -- shows auto-evolve vs manual commit ratio in `log`
+
+### v3.1 New Features
+
+- **EffectTracker** -- true before/after effect tracking: compares TODOs resolved, code lines, function count, duplicate lines, and coverage delta. Produces `effect.json` per iteration. Verdict: positive/neutral/negative.
+- **CostTracker** -- LLM call cost tracking with pricing table (MiniMax-M2, GPT-4, Claude, etc.). Records each call to `llm_calls.jsonl`. Aggregates cost in `catalog.json`. `effects` and `costs` commands to inspect.
+- **IssueLinker** -- after each commit (auto or approved), finds open GitHub issues referencing changed files and auto-closes them with a comment. Powered by `gh issue list --json`.
+- **SmartScheduler** -- activity-based scan frequency. `schedule --suggest` shows per-repo recommendations; `schedule --auto` applies them. Active repos (20+ commits/week) → 24h; active (10+) → 72h; normal (3+) → 168h; idle → 336h.
+- **`effects` command** -- view effect tracking reports for recent iterations
+- **`costs` command** -- view LLM cost breakdown by iteration and model
 
 ---
 
@@ -165,12 +174,26 @@ Flow:
 # Set scan interval (creates cron automatically)
 auto-evolve.py schedule --every 168
 
+# Show smart scheduling recommendations (v3.1)
+auto-evolve.py schedule --suggest
+
+# Apply recommended intervals based on activity (v3.1)
+auto-evolve.py schedule --auto
+
 # Show current schedule
 auto-evolve.py schedule --show
 
 # Remove cron job
 auto-evolve.py schedule --remove
 ```
+
+**v3.1 Smart Scheduling:**
+| Activity | Commits/7d | Recommended Interval |
+|----------|------------|---------------------|
+| 🔥 very_active | ≥20 | 24h |
+| ⚡ active | ≥10 | 72h |
+| 📅 normal | ≥3 | 168h (1 week) |
+| 💤 idle | <3 | 336h (2 weeks) |
 
 ---
 
@@ -203,6 +226,32 @@ Example output:
 ```
 
 `[C] 8A/15M` = 8 auto-evolve commits / 15 manual commits
+
+---
+
+### effects (v3.1)
+
+View effect tracking reports showing before/after impact of iterations.
+
+```bash
+auto-evolve.py effects
+auto-evolve.py effects --iteration 20260405-120000
+```
+
+Effect reports include: TODOs resolved, coverage delta, duplicate lines removed, code lines change, function count change. Verdict: positive/neutral/negative.
+
+---
+
+### costs (v3.1)
+
+View LLM cost breakdown per iteration and per model.
+
+```bash
+auto-evolve.py costs
+auto-evolve.py costs --iteration 20260405-120000
+```
+
+Includes per-model pricing (MiniMax-M2, GPT-4, Claude, etc.), token counts, and total USD cost.
 
 ---
 
@@ -320,12 +369,14 @@ Stats shown in `log` output and stored in iteration manifest.
 .auto-evolve/
   .iterations/
     {id}/
-      manifest.json        -- Metadata + pending items (v3.0: contributors, test_delta)
+      manifest.json        -- Metadata + pending items (v3.1: llm_calls, total_cost_usd)
       plan.md             -- Plan with all changes
       pending-review.json -- Items awaiting review (v3.0: llm_analysis, affected_files)
       report.md           -- Execution results
-      metrics.json       -- Iteration metrics (v3.0: test_coverage_delta)
-      alert.json         -- Quality gate alert (if any)
+      metrics.json        -- Iteration metrics (v3.0: test_coverage_delta)
+      alert.json          -- Quality gate alert (if any)
+      effect.json         -- Before/after effect tracking (v3.1)
+      llm_calls.jsonl     -- LLM call records (v3.1, one JSON per line)
 ```
 
 ---
@@ -349,7 +400,8 @@ File: `~/.auto-evolverc.json`
       "path": "~/.openclaw/workspace/skills/soul-force",
       "type": "skill",
       "visibility": "public",
-      "auto_monitor": true
+      "auto_monitor": true,
+      "scan_interval_hours": 168
     }
   ],
   "notification": {
