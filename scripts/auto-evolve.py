@@ -3922,19 +3922,26 @@ def _display_remaining_pending(
     remaining_pending: list[ChangeItem],
     plan_lines: list[str],
 ) -> None:
-    """Print remaining pending items and extend plan_lines."""
-    if remaining_pending:
-        display_items = remaining_pending[:20]
-        print(f"\n📋 Pending Items ({len(remaining_pending)}):")
-        for i, c in enumerate(display_items, 1):
+    """Print remaining pending items grouped by repository, and extend plan_lines."""
+    if not remaining_pending:
+        return
+    by_repo = _group_by_repo(remaining_pending)
+    total_counter = 1
+    print(f"\n📋 Pending Items ({len(remaining_pending)} across {len(by_repo)} repo(s)):")
+    for repo_path, items in by_repo.items():
+        repo_name = Path(repo_path).name
+        print(f"\n  📦 {repo_name} ({len(items)} items)")
+        for c in items:
             risk_icon = RISK_COLORS.get(c.risk.value, "⚪")
             opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
-            print(f"  [{i}] {risk_icon} P={c.priority:.2f} {c.description[:55]}{opt_badge}")
-        if len(remaining_pending) > 20:
-            print(f"  ... and {len(remaining_pending) - 20} more")
-        plan_lines.extend(["## Pending Items ({})".format(len(remaining_pending)), ""])
-        for i, c in enumerate(remaining_pending, 1):
-            plan_lines.append(f"- [{i}] **{c.risk.value.upper()}** P={c.priority:.2f} {c.description}")
+            print(f"    [{total_counter}] {risk_icon} P={c.priority:.2f} {c.description[:55]}{opt_badge}")
+            total_counter += 1
+    plan_lines.extend(["## Pending Items ({})".format(len(remaining_pending)), ""])
+    for c in remaining_pending:
+        plan_lines.append(
+            f"- [{c.id}] **{c.risk.value.upper()}** P={c.priority:.2f} "
+            f"[{Path(c.repo_path).name}] {c.description}"
+        )
 
 
 def _push_repos(repos_affected: set[str]) -> None:
@@ -4028,6 +4035,14 @@ def _post_scan_cleanup(
     return cost_summary
 
 
+def _group_by_repo(items: list[ChangeItem]) -> dict[str, list[ChangeItem]]:
+    """Group ChangeItems by repo path, preserving order within each group."""
+    groups: dict[str, list[ChangeItem]] = {}
+    for c in items:
+        groups.setdefault(c.repo_path, []).append(c)
+    return groups
+
+
 def _print_scan_summary(
     all_changes: list[ChangeItem],
     all_opts: list[OptimizationFinding],
@@ -4037,7 +4052,7 @@ def _print_scan_summary(
     dry_run: bool,
     rules: dict,
 ) -> None:
-    """Print scan result summary and priority queue."""
+    """Print scan result summary and priority queue, grouped by repository."""
     print(f"\n📊 Scan Results:")
     print(f"  Changes detected: {len(all_changes) - len(all_opts)}")
     print(f"  Optimizations found: {len(all_opts)}")
@@ -4045,14 +4060,23 @@ def _print_scan_summary(
     print(f"  Pending review:      {len(pending_sorted)}")
 
     if pending_sorted:
-        print(f"\n📊 Priority Queue:")
-        for i, c in enumerate(pending_sorted[:10], 1):
-            color = priority_color(c.priority)
-            risk_label = c.risk.value.upper()
-            opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
-            print(f"  [{i}] {color} P={c.priority:.2f} {risk_label}: {c.description[:55]}{opt_badge}")
-        if len(pending_sorted) > 10:
-            print(f"  ... and {len(pending_sorted) - 10} more")
+        print(f"\n📊 Priority Queue (by repo):")
+        by_repo = _group_by_repo(pending_sorted)
+        item_counter = 1
+        for repo_path, items in by_repo.items():
+            repo_name = Path(repo_path).name
+            print(f"\n  📦 {repo_name}")
+            for c in items[:10]:
+                color = priority_color(c.priority)
+                risk_label = c.risk.value.upper()
+                opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
+                print(f"    [{item_counter}] {color} P={c.priority:.2f} {risk_label}: {c.description[:50]}{opt_badge}")
+                item_counter += 1
+            if len(items) > 10:
+                print(f"    ... and {len(items) - 10} more in {repo_name}")
+        extra = len(pending_sorted) - item_counter + 1
+        if extra > 0:
+            print(f"  (total {len(pending_sorted)} items across {len(by_repo)} repos)")
 
     if auto_exec and not dry_run:
         print_execution_preview(all_changes, auto_exec, mode, rules)
