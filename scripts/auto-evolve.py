@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Auto-Evolve v3.5 — Automated skill iteration manager.
+Auto-Evolve v3.6 — Automated skill iteration manager.
 
 Features (v3.5):
 - PersonaAwareMemory: openclaw SQLite primary + hawkbridge LanceDB supplement
@@ -1322,7 +1322,10 @@ def _call_llm_for_refactor(
     reliability of code generation.
     """
     config = get_openclaw_llm_config()
+    import sys as _sys
     if not config.get("api_key") or not config.get("base_url"):
+        _sys.stderr.write(f"[DEBUG] LLM config empty: api_key={bool(config.get('api_key'))}, base_url={config.get('base_url')}\n")
+        _sys.stderr.flush()
         return ""
 
     lang_map = {
@@ -3169,11 +3172,91 @@ class ProductThinkingFinding:
     why_now: str = ""
 
 
+# ===========================================================
+# File Analysis Cache (v3.5)
+# ===========================================================
+
+class FileAnalysisCache:
+    """
+    LRU cache for file analysis results with 10-minute TTL.
+    Key = (file_path, content_hash), Value = parsed JSON result.
+    Persists to disk so it survives across process runs.
+    """
+
+    CACHE_FILE = Path.home() / ".openclaw" / "workspace" / ".file_analysis_cache.json"
+    TTL_MS = 30 * 60 * 1000  # 30 minutes in milliseconds
+
+    def __init__(self) -> None:
+        self._memory: dict[str, dict] = {}  # key -> {result, timestamp_ms}
+        self._load()
+
+    def _load(self) -> None:
+        """Load cache from disk, pruning expired entries."""
+        if not self.CACHE_FILE.exists():
+            return
+        try:
+            data = json.loads(self.CACHE_FILE.read_text(encoding="utf-8"))
+            now_ms = int(time.time() * 1000)
+            for key, entry in data.items():
+                if now_ms - entry.get("_ts", 0) < self.TTL_MS:
+                    self._memory[key] = entry
+            self._save()
+        except (json.JSONDecodeError, OSError):
+            self._memory = {}
+
+    def _save(self) -> None:
+        """Persist memory to disk."""
+        try:
+            self.CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.CACHE_FILE.write_text(
+                json.dumps(self._memory, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _make_key(self, file_path: str, content: str) -> str:
+        """Build a cache key from file path and content hash."""
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        return f"{file_path}@{h}"
+
+    def get(self, file_path: str, content: str) -> Optional[dict]:
+        """Return cached result if fresh, else None."""
+        key = self._make_key(file_path, content)
+        entry = self._memory.get(key)
+        if entry is None:
+            return None
+        now_ms = int(time.time() * 1000)
+        if now_ms - entry.get("_ts", 0) > self.TTL_MS:
+            del self._memory[key]
+            self._save()
+            return None
+        return entry.get("result")
+
+    def set(self, file_path: str, content: str, result: dict) -> None:
+        """Store result in cache with current timestamp."""
+        key = self._make_key(file_path, content)
+        self._memory[key] = {"result": result, "_ts": int(time.time() * 1000)}
+        self._save()
+
+
+# ===========================================================
+# ProductThinkingScanner (v3.5)
+# Batch analysis + 10-min cache to slash LLM calls
+# ===========================================================
+
 class ProductThinkingScanner:
     """
     Scans the codebase asking: what is actually broken for users?
     This is NOT a code quality scanner.
+
+    v3.5 changes:
+    - FileAnalysisCache: 30-min TTL per file, survives process restart
+    - Batch analysis: up to 5 files per LLM call instead of 1 file = 1 call
     """
+
+    # Files per LLM call in batch mode
+    BATCH_SIZE = 5
 
     def __init__(self, repos: list[Repository], config: dict,
                  recall_persona: str = "", memory_source: str = "auto") -> None:
@@ -3186,6 +3269,7 @@ class ProductThinkingScanner:
         self.hawk_prefs = self.memory.get_preferences()
         self.effective_persona = self.memory.context_persona
         self.learnings = self._load_learnings_context()
+        self._cache = FileAnalysisCache()
 
     def _load_learnings_context(self) -> str:
         """Build a context string from learnings history, using current persona's workspace."""
@@ -3239,95 +3323,178 @@ class ProductThinkingScanner:
         return all_findings
 
     def _scan_key_files(self, repo: Repository) -> list[ProductThinkingFinding]:
+        """
+        Collects all priority files, checks cache, then sends remaining files
+        to LLM in batches of BATCH_SIZE (5) to minimize LLM calls.
+        """
         findings: list[ProductThinkingFinding] = []
         repo_path = repo.resolve_path()
-        priority_files: list[Path] = []
-        for fp in [repo_path / "README.md", repo_path / "SOUL.md", repo_path / "AGENTS.md"]:
+
+        # 1. Collect all priority files
+        priority_files: list[tuple[Path, str, str]] = []  # (Path, rel_path, content)
+        sentinels = [
+            repo_path / "README.md",
+            repo_path / "SOUL.md",
+            repo_path / "AGENTS.md",
+        ]
+        for fp in sentinels:
             if fp.exists():
-                priority_files.append(fp)
+                priority_files.append((fp, str(fp.relative_to(repo_path)), ""))
         for skill_dir in (repo_path / "skills").glob("*"):
             md = skill_dir / "SKILL.md"
             if md.exists():
-                priority_files.append(md)
+                priority_files.append((md, str(md.relative_to(repo_path)), ""))
         for script in list(repo_path.glob("scripts/*.py")) + list(repo_path.glob("*.py")):
             if script.exists():
-                priority_files.append(script)
-        for fp in priority_files:
+                priority_files.append((script, str(script.relative_to(repo_path)), ""))
+
+        # 2. Load content and partition into cached vs. needs-analysis
+        uncached: list[tuple[str, str, str]] = []  # (rel_path, content, cache_key)
+        for fp, rel, _ in priority_files:
             try:
                 content = fp.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
-            rel = str(fp.relative_to(repo_path))
             if len(content) > 8000:
                 content = content[:8000]
-            finding = self._analyze_file_for_product_thinking(content, rel, repo)
-            if finding:
-                findings.append(finding)
+            cached = self._cache.get(rel, content)
+            if cached:
+                finding = self._parse_finding(cached, rel)
+                if finding:
+                    findings.append(finding)
+                    print(f"  [cache hit] {rel}")
+            else:
+                uncached.append((rel, content, rel))  # rel = cache key
+
+        if not uncached:
+            return findings
+
+        # 3. Batch uncached files (BATCH_SIZE per LLM call)
+        total_batches = (len(uncached) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+        print(f"  [cache miss] {len(uncached)} files — batching into {total_batches} LLM call(s)")
+        for batch_idx in range(total_batches):
+            batch = uncached[batch_idx * self.BATCH_SIZE:(batch_idx + 1) * self.BATCH_SIZE]
+            results = self._batch_analyze(batch, repo)
+            for rel, content, _ in batch:
+                result = results.get(rel)
+                if result:
+                    self._cache.set(rel, content, result)
+                    finding = self._parse_finding(result, rel)
+                    if finding:
+                        findings.append(finding)
+
         return findings
 
-    def _analyze_file_for_product_thinking(
-        self, content: str, file_path: str, repo: Repository
-    ) -> Optional[ProductThinkingFinding]:
+    def _batch_analyze(
+        self, batch: list[tuple[str, str, str]], repo: Repository
+    ) -> dict[str, dict]:
+        """
+        Send a batch of up to BATCH_SIZE files to LLM in a single call.
+        Returns a dict mapping file_path -> parsed JSON result.
+        """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
-            return None
+            return {}
+
         hawk_block = ""
         if self.hawk_prefs.get("disliked"):
-            hawk_block += "\n\n主人不喜欢的东西（hawk-bridge 记忆）：\n" + "\n".join(f"  - {d}" for d in self.hawk_prefs["disliked"][:3])
+            hawk_block += "\n\n主人不喜欢的东西（hawk-bridge 记忆）：\n" + "\n".join(
+                f"  - {d}" for d in self.hawk_prefs["disliked"][:3]
+            )
         if self.hawk_prefs.get("liked"):
-            hawk_block += "\n\n主人喜欢的东西（hawk-bridge 记忆）：\n" + "\n".join(f"  - {l}" for l in self.hawk_prefs["liked"][:3])
+            hawk_block += "\n\n主人喜欢的东西（hawk-bridge 记忆）：\n" + "\n".join(
+                f"  - {l}" for l in self.hawk_prefs["liked"][:3]
+            )
         if not hawk_block:
             hawk_block = "\n\n（无 hawk-bridge 偏好记忆）"
 
+        # Build per-file sections for the prompt
+        file_sections: list[str] = []
+        for rel_path, content, _ in batch:
+            lang = detect_language_from_path(rel_path)
+            file_sections.append(
+                f"--- FILE: {rel_path} ---\n```{lang}\n{content[:4000]}\n```"
+            )
+        files_block = "\n\n".join(file_sections)
+
         system = (
             f"You are the CONTINUOUS IMPROVEMENT PARTNER for persona: {self.effective_persona}.\n\n"
-            "IMPORTANT: For EVERY file you analyze, ask from this persona's perspective:\n"
-            "\"还有什么不足, 有哪些地方可以优化, 使用体验如何？\"\n\n"
+            "IMPORTANT: Answer the SAME question for EACH file listed below.\n"
+            "Question: \"还有什么不足, 有哪些地方可以优化, 使用体验如何？\"\n\n"
             f"【{self.effective_persona} 上下文】\n"
             f"{self.master_summary}\n"
             f"【{self.effective_persona} 偏好】\n"
             f"{hawk_block}\n"
             "【学习历史】\n"
             f"{self.learnings}\n\n"
-            "Answer ONLY with a JSON object with keys: "
-            "  insight (answer to the 3 questions above — max 150 chars, honest), "
-            "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature), "
+            "Answer with ONLY a JSON array. No markdown fences, no explanation.\n"
+            "Each element must have keys: "
+            "  file_path (string, match the name exactly), "
+            "  insight (max 150 chars, honest, in Chinese), "
+            "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature | ok), "
             "  impact (0.0 to 1.0), "
-            "  evidence (array of 1-2 short text snippets that support this), "
-            "  suggested_direction (one concrete next step, max 100 chars), "
-            "  why_now (why this matters now, max 80 chars). "
-            "If nothing significant is broken, return {\"insight\": \"\", \"category\": \"ok\", \"impact\": 0.0, \"evidence\": [], \"suggested_direction\": \"\", \"why_now\": \"\"}. "
-            "Be honest. Prefer 'stop doing X' over 'add more features'."
+            "  evidence (array of 1-2 short text snippets, each max 80 chars), "
+            "  suggested_direction (max 100 chars), "
+            "  why_now (max 80 chars). "
+            "If a file is fine, use category 'ok' and impact 0.0 with empty insight."
         )
-        lang = detect_language_from_path(file_path)
+
         prompt = (
-            "IMPORTANT: Answer with ONLY a JSON object. No explanation.\n\n"
-            f"File: {file_path}\n\n"
-            f"Content (excerpt):\n```{lang}\n{content[:5000]}\n```\n\n"
-            "请回答：还有什么不足, 有哪些地方可以优化, 使用体验如何？"
+            "IMPORTANT: Answer with ONLY a JSON array. No fences, no text outside the array.\n\n"
+            f"{files_block}\n\n"
+            "Return a JSON array with one entry per file, in the same order."
         )
-        result = call_llm(prompt=prompt, system=system, model=config["model"],
-                          base_url=config["base_url"], api_key=config["api_key"])
+
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            model=config["model"],
+            base_url=config["base_url"],
+            api_key=config["api_key"],
+        )
+
         if not result:
-            return None
+            return {}
+
+        output: dict[str, dict] = {}
+        # Try parsing as a JSON array
         try:
             parsed = json.loads(result)
         except json.JSONDecodeError:
-            m = re.search(r'\{[^{}]*\}', result, re.DOTALL)
-            if not m:
-                return None
-            try:
-                parsed = json.loads(m.group())
-            except Exception:
-                return None
+            # Try to extract array from mixed output
+            m = re.search(r'\[[\s\S]*\]', result)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except Exception:
+                    return {}
+            else:
+                return {}
+
+        if not isinstance(parsed, list):
+            return {}
+
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("file_path", "")
+            if fp:
+                output[fp] = item
+
+        return output
+
+    def _parse_finding(self, parsed: dict, file_path: str) -> Optional[ProductThinkingFinding]:
+        """Parse a cached or LLM-parsed dict into a ProductThinkingFinding."""
         insight = parsed.get("insight", "").strip()
-        if not insight or parsed.get("category") == "ok" or parsed.get("impact", 0.0) == 0.0:
+        category = parsed.get("category", "")
+        impact = float(parsed.get("impact", 0.0))
+        if not insight or category == "ok" or impact == 0.0:
             return None
         return ProductThinkingFinding(
             description=insight,
-            category=parsed.get("category", "user_complaint"),
+            category=category,
             evidence=parsed.get("evidence", []),
-            impact_score=float(parsed.get("impact", 0.5)),
+            impact_score=impact,
             suggested_direction=parsed.get("suggested_direction", ""),
             why_now=parsed.get("why_now", ""),
             file_path=file_path,
@@ -4823,7 +4990,7 @@ def cmd_learnings(args) -> int:
         if not rejections:
             print("  (none)")
         for r in rejections[: args.limit or 20]:
-            print(f"  [{r.get('date') or r.get('timestamp', 'unknown')[:10]}] {r.get('repo', '').split('/')[-1]}")
+            print(f"  [{r['date']}] {r['repo'].split('/')[-1]}")
             print(f"    {r['description'][:70]}")
             if r.get("reason"):
                 print(f"    Reason: {r['reason']}")
@@ -4836,7 +5003,7 @@ def cmd_learnings(args) -> int:
         if not approvals:
             print("  (none)")
         for a in approvals[: args.limit or 20]:
-            print(f"  [{a.get('date') or a.get('timestamp', 'unknown')[:10]}] {a.get('repo', '').split('/')[-1]}")
+            print(f"  [{a['date']}] {a['repo'].split('/')[-1]}")
             print(f"    {a['description'][:70]}")
             if a.get("reason"):
                 print(f"    Reason: {a['reason']}")
