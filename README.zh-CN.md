@@ -1,150 +1,221 @@
 # Auto-Evolve
 
-**AI Agent 驱动项目持续进化的自动巡检引擎。**
+**让项目自己学会进化——主人安装后，项目会越用越好。**
 
-> 让项目越用越好——通过持续追问"还有什么不足, 有哪些地方可以优化, 使用体验如何？"，然后自主或半自主地执行改进。
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://img.shields.io/badge/Python-3.10+-blue.svg)
+> 你安装一次，它在后台运行。项目自动变好——不需要你反复手动介入。
 
 **English**: [README.md](README.md)
 
 ---
 
-## 它是什么？
+## 一句话定位
 
-Auto-Evolve 是一个**运行在 OpenClaw 上的自动巡检引擎**。
-
-每 N 分钟，它会：
-1. 扫描指定的项目（skill、norms 或 project）
-2. 从**主人视角**问："还有什么不足, 有哪些地方可以优化, 使用体验如何？"
-3. 结合主人的背景、偏好、历史学习，给出**真正的产品改进建议**
-4. 在 `full-auto` 模式下自主执行低风险改动，在 `semi-auto` 模式下等待确认
-
-**不是**代码质量扫描器——它是项目的**持续改进伙伴**。
+**Auto-Evolve 让项目自己学会进化。** 主人安装一次，之后项目会自己发现问题、自己改进、自己积累经验——不需要主人反复手动介入。
 
 ---
 
-## 核心功能
+## 它解决了什么问题？
 
-### 🎯 从主人视角追问
+**没有 Auto-Evolve 时：**
+- 项目代码随着时间腐烂（TODO 堆积、重复代码扩散、测试覆盖率下降）
+- 每次功能迭代都要主人花时间做代码审查
+- 团队成员各自为政，没有统一的改进节奏
+- 好的实践无法持续积累
 
-不是问"代码有没有问题"，而是带着主人的背景来问：
-
-```
-主人背景：主人追求自动化，讨厌手动操作...
-主人偏好：主人之前拒绝了 3 次自动生成 test 的改动...
-历史：主人批准过删除 TODO 的改动...
-
-"还有什么不足, 有哪些地方可以优化, 使用体验如何？"
-```
-
-### 🧠 Persona 感知记忆系统
-
-支持按 persona（main/tseng/wukong/bajie/bailong）召回对应的：
-- OpenClaw SQLite 记忆库（`memory/{persona}.sqlite`）
-- hawk-bridge 向量记忆（`lancedb/`）
-- `learnings/` 中的历史决策
-
-### 📊 产品洞察 + 代码优化
-
-巡检输出两类结果：
-
-**产品洞察**（来自 LLM 主人视角分析）：
-```
-🎯 Product Evolution Insights:
-  🚫 [STOP_DOING] missing_test 被拒绝 3 次了 → 停止
-  😤 [USER_COMPLAINT] 这流程太麻烦，主人得手动做 3 步
-  📊 [COMPETITIVE_GAP] 竞品有这个功能我们没有
-```
-
-**代码优化**（来自扫描器）：
-```
-🔧 Code Optimizations:
-  🟢 duplicate_code: scripts/lua_def_file.py (3处重复)
-  🟡 long_function: soulforge.py:127行 > 100行
-  🟡 missing_test: 5个模块缺少测试覆盖
-```
-
-### ⚡ 执行模式
-
-| 模式 | 说明 |
-|------|------|
-| `full-auto` | 低风险改动自动执行；中风险开 PR；高风险跳过 |
-| `semi-auto` | 所有改动等待确认后执行 |
-
-### 🔒 安全机制
-
-- **质量门槛**：语法检查 + pytest/jest 真实测试
-- **git revert 回滚**：一键回滚到上一版本
-- **learnings 过滤**：被拒绝的改动不再重复尝试
-- **Privacy**：closed 仓库代码不外泄
+**有了 Auto-Evolve 后：**
+- 项目每 N 分钟自动扫描一次，发现问题立刻处理
+- 改动自动记录到 `learnings/`（项目的记忆，不会重复犯同一个错）
+- 版本控制——每次改动都有 git 历史，可回滚
+- 主人只需要关注真正需要判断的高风险决策
 
 ---
 
-## 快速开始
+## 核心特性
+
+### 🚀 安装即用，无需人工干预
 
 ```bash
 # 安装
 clawhub install auto-evolve
 
-# 添加巡检项目
-python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force --type skill --monitor
+# 配置要巡检的项目
+python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force \
+  --type skill --monitor
 
-# 全自动化巡检
-python3 scripts/auto-evolve.py scan
-
-# 预览模式（不执行）
-python3 scripts/auto-evolve.py scan --dry-run
-
-# 以主人视角召回记忆巡检
-python3 scripts/auto-evolve.py scan --dry-run --recall-persona master --memory-source both
-
-# 每 10 分钟自动巡检
+# 启动全自动化
+python3 scripts/auto-evolve.py set-mode full-auto
 python3 scripts/auto-evolve.py schedule --every 10
+```
+
+之后项目会自动进化，主人只需要：
+- 偶尔收到飞书推送："这个改动被拒绝了，因为..."
+- 真正重要的高风险决策才会来问你
+
+### 📈 版本控制的进化历史
+
+每次改动都有 git commit：
+```
+commit a3f8b12
+auto: [auto-evolve] 消除 duplicate_code in scripts/lua_def_file.py
+
+commit b2c9d34
+auto: 删除 3 个空的 TODO 注释
+
+commit c7e1f88
+auto: 消除 duplicate_code in build/ci/test-configs.py
+```
+
+- 所有改动可审计、可回滚
+- 进化历史清晰可见
+- 不满意？`auto-evolve rollback` 一键回退
+
+### 🧠 learnings——项目的记忆
+
+Auto-Evolve 把每次执行结果记录到 `learnings/` 目录：
+
+```
+.learnings/
+├── approvals.json    # 成功执行过的改动
+├── rejections.json   # 被拒绝/失败的改动及原因
+└── metrics/          # 每次迭代的指标趋势
+```
+
+**learnings 的价值：**
+- 同一个错误不会犯两次
+- 知道什么改动主人喜欢，什么改动主人讨厌
+- 随着时间积累，Auto-Evolve 越来越懂这个项目
+
+**依赖 soul-force 才能开启完整 learnings 功能：**
+```bash
+# 安装 soul-force（提供 learnings 分析 + 每日记忆总结）
+clawhub install soul-force
+```
+
+### 🧬 依赖的 Skills
+
+Auto-Evolve 本身只做巡检和执行。完整能力需要配合以下 skills：
+
+| Skill | 作用 | 是否必需 |
+|--------|-------|---------|
+| **soul-force** | 提供 learnings 分析、每日记忆总结 | 推荐安装 |
+| **hawk-bridge** | 提供向量语义记忆，按 persona 隔离召回主人偏好 | 可选 |
+| **auto-evolve** | 巡检引擎 + 执行器 | 必需 |
+
+### 🌐 Persona 感知的团队巡检
+
+不同 agent 可以巡检不同的项目：
+
+```bash
+# 悟空巡检自己的后端项目
+python3 scripts/auto-evolve.py scan --recall-persona wukong --dry-run
+
+# 唐僧巡检 soul-force
+python3 scripts/auto-evolve.py scan --recall-persona tseng --dry-run
+
+# 八戒巡检前端项目
+python3 scripts/auto-evolve.py scan --recall-persona bajie --dry-run
+```
+
+每个 agent 的 workspace 隔离，learnings 互不影响。
+
+---
+
+## 工作原理
+
+```
+主人安装 auto-evolve
+    │
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│  每 N 分钟，cron 触发 scan                              │
+│                                                          │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  1. 读取项目当前状态                              │   │
+│  │     - 代码中有多少 TODO？                       │   │
+│  │     - 有多少重复代码？                          │   │
+│  │     - 测试覆盖率是多少？                        │   │
+│  └─────────────────────┬──────────────────────────────┘   │
+│                        ▼                                 │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  2. 读取 learnings（项目记忆）                  │   │
+│  │     - 之前哪些改动成功了？                      │   │
+│  │     - 哪些改动被拒绝了？原因是什么？            │   │
+│  │     - 主人偏好什么风格？                      │   │
+│  └─────────────────────┬──────────────────────────────┘   │
+│                        ▼                                 │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  3. 主人视角的判断                            │   │
+│  │     "还有什么不足, 有哪些地方可以优化,          │   │
+│  │      使用体验如何？"                            │   │
+│  └─────────────────────┬──────────────────────────────┘   │
+│                        ▼                                 │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  4. 决策 + 执行                                │   │
+│  │     低风险 → 自动执行 → 记录到 learnings        │   │
+│  │     中风险 → 开 PR → 等确认                    │   │
+│  │     高风险 → 跳过 → 通知主人                    │   │
+│  └────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 架构
+## 快速开始
+
+### 完整安装（推荐）
+
+```bash
+# 1. 安装 auto-evolve（核心引擎）
+clawhub install auto-evolve
+
+# 2. 安装 soul-force（提供 learnings + 记忆进化）
+clawhub install soul-force
+
+# 3. 安装 hawk-bridge（可选，提供向量语义记忆）
+clawhub install hawk-bridge
+
+# 4. 配置要巡检的项目
+python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force \
+  --type skill --monitor
+
+# 5. 设置自动巡检
+python3 scripts/auto-evolve.py set-mode full-auto
+python3 scripts/auto-evolve.py schedule --every 10
+```
+
+### 单独使用
+
+```bash
+# 只装 auto-evolve（无 learnings 能力）
+clawhub install auto-evolve
+
+# 只做预览，不执行任何改动
+python3 scripts/auto-evolve.py scan --dry-run
+```
+
+---
+
+## 巡检输出示例
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Auto-Evolve 巡检引擎                      │
-│                                                         │
-│  Cron 触发（每 N 分钟）                                    │
-│       │                                                  │
-│       ▼                                                  │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Persona 检测 + Workspace 定位                    │    │
-│  │  detect_persona() → main/tseng/wukong/...        │    │
-│  └─────────────────────┬───────────────────────────┘    │
-│                        ▼                                 │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  记忆召回（按 persona）                         │    │
-│  │  OpenClaw SQLite (primary)                    │    │
-│  │  + hawk-bridge LanceDB (supplement)           │    │
-│  │  + learnings history                           │    │
-│  └─────────────────────┬───────────────────────────┘    │
-│                        ▼                                 │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  LLM 产品级分析（主人视角）                      │    │
-│  │  "还有什么不足, 有哪些地方可以优化,              │    │
-│  │   使用体验如何？"                                │    │
-│  └─────────────────────┬───────────────────────────┘    │
-│                        ▼                                 │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  代码扫描（并行）                                │    │
-│  │  重复代码 / 长函数 / TODO / 测试覆盖            │    │
-│  └─────────────────────┬───────────────────────────┘    │
-│                        ▼                                 │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  优先级排序 + 质量门槛                          │    │
-│  │  full-auto: 低风险 → 自动执行                   │    │
-│  │  full-auto: 中风险 → 开 PR                     │    │
-│  │  semi-auto: 全部 → 等待确认                    │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+🔍 Auto-Evolve Scanner [full-auto]
+==================================================
+
+📊 项目状态:
+   TODO: 12 → 9  (-3 已解决)
+   重复代码: 8 → 5  (-3 已解决)
+   测试覆盖率: 68% → 71%  (+3%)
+
+🎯 产品洞察:
+   🚫 [停止做] 主人拒绝了 3 次生成 test 文件 → 停止尝试
+   😤 [用户体验] 这个配置流程太麻烦，主人得手动做 5 步
+
+🔧 自动执行:
+   ✅ duplicate_code: scripts/lua_def_file.py (P=0.68)
+   ✅ todo_cleanup: 3 个空 TODO 已删除
+   ⏭  等待确认: soulforge.py 长函数 127行
+
+💾 Learnings: 3 个批准, 0 个拒绝 已记录
 ```
 
 ---
@@ -153,51 +224,37 @@ python3 scripts/auto-evolve.py schedule --every 10
 
 | 命令 | 说明 |
 |------|------|
-| `scan` | 巡检项目 |
-| `scan --dry-run` | 预览，不执行 |
+| `scan` | 巡检所有项目 |
+| `scan --dry-run` | 预览模式（不执行） |
 | `scan --recall-persona master` | 召回主人记忆巡检 |
-| `scan --memory-source openclaw` | 指定记忆源 |
-| `confirm` | 确认执行待处理改动 |
-| `approve / reject` | 批准/拒绝并记录原因 |
+| `confirm` | 确认并执行待处理改动 |
+| `approve / reject` | 批准/拒绝（记录到 learnings） |
 | `set-mode full-auto` | 全自动化模式 |
-| `set-rules --low true` | 设置自动执行规则 |
-| `schedule --every 10` | 每 10 分钟巡检 |
-| `learnings` | 查看学习历史 |
-| `rollback` | 回滚 |
+| `learnings` | 查看项目记忆 |
+| `rollback` | 回滚上一版本 |
+| `schedule --every 10` | 每 10 分钟自动巡检 |
 
 ---
 
-## 当前能力边界
+## 安全机制
 
-**能自动做的（低风险）：**
-- ✅ 删除空的 TODO/FIXME 注释
-- ✅ 消除简单的字符串重复
-- ✅ 更新依赖版本号为 semver 范围
-- ✅ 修复轻微的格式化问题
-
-**需要确认的（中风险）：**
-- ⚠️ 重构函数结构
-- ⚠️ 跨文件改动
-- ⚠️ 修改业务逻辑
-
-**还做不到的：**
-- ❌ 复杂的多文件重构
-- ❌ 需要理解业务语义的改动
-- ❌ 没有测试保障的改动
+- **版本控制**：所有改动有 git 历史，可回滚
+- **质量门槛**：Python pytest / JS jest 实际测试通过后才算成功
+- **learnings 过滤**：被拒绝的改动不会重复尝试
+- **隐私保护**：closed 仓库代码不外泄
+- **权限分离**：敏感操作需要主人确认
 
 ---
 
-## 改进路线图
+## 依赖说明
 
-| 优先级 | 改进点 | 说明 |
-|--------|--------|------|
-| 🔴 最高 | LLM 代码生成可靠性 | 当前 ~40% 返回 prose 而非代码，需改进 prompt engineering |
-| 🔴 最高 | learnings 数据积累 | learnings 一直是空的，需要真正跑起来积累数据 |
-| 🟡 次高 | 指标趋势跟踪 | 记录每次迭代的 metrics（TODO 数、重复率、测试覆盖率），画出趋势图 |
-| 🟡 次高 | GitHub Issue 主动开单 | 发现产品问题后自动在 GitHub 开 Issue |
-| 🟡 次高 | 主动通知 | 巡检结果主动推送到飞书/邮件，而不是等 Cron |
-| 🟢 优化 | Cron 动态调整 | 根据项目活跃度动态调整巡检频率 |
-| 🟢 优化 | 团队多人集成 | 支持唐僧/悟空等多个 agent 各自巡检各自的项目 |
+Auto-Evolve 是一个巡检引擎，以下 skills 提供额外能力：
+
+| Skill | 版本 | 说明 |
+|-------|------|------|
+| auto-evolve | ≥3.5 | **必需**。核心巡检 + 执行引擎 |
+| soul-force | ≥2.2 | 推荐。提供 learnings 分析、每日记忆总结 |
+| hawk-bridge | any | 可选。向量语义记忆，按 persona 隔离 |
 
 ---
 

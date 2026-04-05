@@ -1,207 +1,269 @@
 # Auto-Evolve
 
-**Self-improvement engine for AI agents — continuously scans projects and asks from the master's perspective: "what's missing, what can be optimized, and how's the user experience?" then acts.**
+**让项目自己学会进化——主人安装后，项目会越用越好。**
 
-> Make your projects better — automatically. Auto-Evolve v3.5 asks from the **master's perspective**, leverages **persona-aware memory context**, and evolves your tools with or without human oversight.
+> You install it once. It runs in the background. Your projects get smarter — automatically.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://img.shields.io/badge/Python-3.10+-blue.svg)
 
-**中文文档**: [README.zh-CN.md](README.zh-CN.md)
+**中文**: [README.zh-CN.md](README.zh-CN.md)
 
 ---
 
-## What Is It?
+## 一句话定位
 
-Auto-Evolve is an **automated scanning engine running on OpenClaw**.
-
-Every N minutes, it:
-1. Scans configured projects (skills, norms, or projects)
-2. Asks from the **master's perspective**: "what's missing, what can be optimized, how's the user experience?"
-3. Combines master's context, preferences, and learning history to surface **real product improvement insights**
-4. In `full-auto` mode: autonomously executes low-risk changes; in `semi-auto` mode: waits for confirmation
-
-It is **not** a code quality scanner — it's a **continuous improvement partner** for your projects.
+**Auto-Evolve 让项目自己学会进化。** 主人安装一次，之后项目会自己发现问题、自己改进、自己积累经验——不需要主人反复手动介入。
 
 ---
 
-## Key Features
+## 它解决了什么问题？
 
-### 🎯 Asks from Master's Perspective
+没有 Auto-Evolve 时：
+- 项目代码随着时间腐烂（TODO 堆积、重复代码扩散、测试覆盖率下降）
+- 每次功能迭代都要主人花时间做代码审查
+- 团队成员各自为政，没有统一的改进节奏
+- 好的实践无法持续积累
 
-Not "does this code have issues?" — but with master's full context:
-
-```
-Master's context: pursues automation, dislikes manual steps...
-Master's preferences: rejected auto-generating tests 3 times...
-Learning history: approved TODO deletions 5 times...
-
-"What's missing, what can be optimized, how's the user experience?"
-```
-
-### 🧠 Persona-Aware Memory
-
-Recalls memories by persona (main/tseng/wukong/bajie/bailong):
-- OpenClaw SQLite (`memory/{persona}.sqlite`)
-- hawk-bridge LanceDB vector store
-- `learnings/` decision history
-
-### 📊 Product Insights + Code Optimizations
-
-**Product insights** (LLM, master's perspective):
-```
-🎯 Product Evolution Insights:
-  🚫 [STOP_DOING] missing_test rejected 3x → stop generating
-  😤 [USER_COMPLAINT] workflow requires 3 manual steps
-  📊 [COMPETITIVE_GAP] competitors have this feature we don't
-```
-
-**Code optimizations** (scanner):
-```
-🔧 Code Optimizations:
-  🟢 duplicate_code: scripts/lua_def_file.py (3 occurrences)
-  🟡 long_function: soulforge.py:127 lines > 100
-  🟡 missing_test: 5 modules lack test coverage
-```
-
-### ⚡ Execution Modes
-
-| Mode | Behavior |
-|------|----------|
-| `full-auto` | Low-risk → auto-execute; medium-risk → open PR; high-risk → skip |
-| `semi-auto` | All changes wait for human confirmation |
-
-### 🔒 Safety
-
-- **Quality gates**: syntax check + pytest/jest actual tests
-- **git revert rollback**: one-command rollback
-- **Learnings filter**: rejected changes not retried
-- **Privacy**: closed repo code is redacted
+有了 Auto-Evolve 后：
+- 项目每 10 分钟自动扫描一次，发现问题立刻处理
+- 改动自动记录到 learnings（ learnings 是项目的记忆，不会重复犯同一个错）
+- 版本控制——每次改动都有 git 历史，可回滚
+- 主人只需要关注真正需要判断的高风险决策
 
 ---
 
-## Quick Start
+## 核心特性
+
+### 🚀 安装即用，无需人工干预
 
 ```bash
-# Install
+# 安装
 clawhub install auto-evolve
 
-# Add project to scan
+# 配置要巡检的项目
 python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force --type skill --monitor
 
-# Full-auto scan
-python3 scripts/auto-evolve.py scan
-
-# Preview mode (no execution)
-python3 scripts/auto-evolve.py scan --dry-run
-
-# Scan with master's memory recall
-python3 scripts/auto-evolve.py scan --dry-run --recall-persona master --memory-source both
-
-# Auto-scan every 10 minutes
+# 启动全自动化
+python3 scripts/auto-evolve.py set-mode full-auto
 python3 scripts/auto-evolve.py schedule --every 10
 ```
 
----
+之后项目会自动进化，主人只需要：
+- 偶尔收到飞书推送："这个改动被拒绝了，因为..."
+- 真正重要的高风险决策才会来问你
 
-## Architecture
+### 📈 版本控制的进化历史
 
+每次改动都有 git commit：
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                 Auto-Evolve Scanning Engine                   │
-│                                                              │
-│  Cron trigger (every N minutes)                             │
-│        │                                                     │
-│        ▼                                                     │
-│  ┌────────────────────────────────────────────────────┐   │
-│  │  Persona Detection + Workspace Resolution            │   │
-│  └────────────────────┬───────────────────────────────┘   │
-│                         ▼                                    │
-│  ┌────────────────────────────────────────────────────┐   │
-│  │  Memory Recall (by persona)                         │   │
-│  │  OpenClaw SQLite (primary)                        │   │
-│  │  + hawk-bridge LanceDB (supplement)                │   │
-│  │  + learnings history                               │   │
-│  └────────────────────┬───────────────────────────────┘   │
-│                         ▼                                    │
-│  ┌────────────────────────────────────────────────────┐   │
-│  │  LLM Product-Level Analysis (master's perspective)  │   │
-│  │  "What's missing? What can be optimized?          │   │
-│  │   How's the user experience?"                       │   │
-│  └────────────────────┬───────────────────────────────┘   │
-│                         ▼                                    │
-│  ┌────────────────────────────────────────────────────┐   │
-│  │  Code Scanning (parallel)                           │   │
-│  │  Duplicates / Long Functions / TODOs / Tests        │   │
-│  └────────────────────┬───────────────────────────────┘   │
-│                         ▼                                    │
-│  ┌────────────────────────────────────────────────────┐   │
-│  │  Priority + Quality Gates                           │   │
-│  │  full-auto: low-risk → auto-execute               │   │
-│  │  full-auto: medium-risk → open PR                  │   │
-│  │  semi-auto: all → wait for confirmation            │   │
-│  └────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────┘
+commit a3f8b12
+auto: [auto-evolve] 消除 duplicate_code in scripts/lua_def_file.py
+
+commit b2c9d34
+auto: 删除 3 个空的 TODO 注释
+
+commit c7e1f88
+auto: 消除 duplicate_code in build/ci/test-configs.py
 ```
 
+- 所有改动可审计、可回滚
+- 进化历史清晰可见
+- 不满意？`auto-evolve rollback` 一键回退
+
+### 🧠 learnings——项目的记忆
+
+Auto-Evolve 会把每次执行结果记录到 `learnings/` 目录：
+
+```
+.learnings/
+├── approvals.json   # 成功执行过的改动
+├── rejections.json # 被拒绝/失败的改动
+└── metrics/        # 每次迭代的指标趋势
+```
+
+**learnings 的价值：**
+- 同一个错误不会犯两次
+- 知道什么改动主人喜欢，什么改动主人讨厌
+- 随着时间积累，Auto-Evolve 越来越懂这个项目
+
+**依赖 soul-force 才能开启 learnings 功能：**
+```bash
+# 安装 soul-force（提供 learnings 分析能力）
+clawhub install soul-force
+```
+
+### 🧬 依赖的 Skills
+
+Auto-Evolve 本身只做巡检和执行。完整能力需要配合以下 skills：
+
+| Skill | 作用 | 是否必需 |
+|--------|-------|---------|
+| **soul-force** | 提供 learnings 分析、每日记忆总结 | 推荐安装 |
+| **hawk-bridge** | 提供向量语义记忆，按 persona 隔离召回主人偏好 | 可选 |
+| **auto-evolve** | 巡检引擎 + 执行器 | 必需 |
+
+### 🌐 Persona 感知的团队巡检
+
+不同 agent 可以巡检不同的项目：
+
+```bash
+# 悟空巡检自己的后端项目
+python3 scripts/auto-evolve.py scan --recall-persona wukong --dry-run
+
+# 唐僧巡检 soul-force
+python3 scripts/auto-evolve.py scan --recall-persona tseng --dry-run
+
+# 八戒巡检前端项目
+python3 scripts/auto-evolve.py scan --recall-persona bajie --dry-run
+```
+
+每个 agent 的 workspace 隔离，learnings 互不影响。
+
 ---
 
-## Commands
+## 工作原理
 
-| Command | Description |
-|---------|-------------|
-| `scan` | Scan projects |
-| `scan --dry-run` | Preview, no execution |
-| `scan --recall-persona master` | Scan with master's memory |
-| `scan --memory-source openclaw` | Specify memory source |
-| `confirm` | Confirm and execute pending changes |
-| `approve / reject` | Approve/reject with reason logged |
-| `set-mode full-auto` | Full automation mode |
-| `set-rules --low true` | Configure auto-execute rules |
-| `schedule --every 10` | Scan every 10 minutes |
-| `learnings` | View learning history |
-| `rollback` | Rollback to previous version |
-
----
-
-## Current Capabilities
-
-**Can auto-execute (low-risk):**
-- ✅ Delete empty TODO/FIXME comments
-- ✅ Eliminate simple string duplicates
-- ✅ Convert pinned versions to semver ranges
-- ✅ Fix minor formatting issues
-
-**Needs confirmation (medium-risk):**
-- ⚠️ Refactor function structure
-- ⚠️ Cross-file changes
-- ⚠️ Modify business logic
-
-**Cannot yet do:**
-- ❌ Complex multi-file refactoring
-- ❌ Business-semantics-aware changes
-- ❌ Changes without test coverage
-
----
-
-## Improvement Roadmap
-
-| Priority | Item | Description |
-|----------|------|-------------|
-| 🔴 Highest | LLM code generation reliability | Currently ~40% returns prose instead of code; needs prompt engineering fix |
-| 🔴 Highest | Learnings data accumulation | learnings is always empty; needs real iteration runs to accumulate data |
-| 🟡 High | Metric trend tracking | Record per-iteration metrics (TODOs, duplication rate, test coverage) and draw trend charts |
-| 🟡 High | GitHub Issue proactive creation | Auto-open Issue when product-level problem is found |
-| 🟡 High | Proactive notifications | Push scan results to Feishu/email instead of waiting for Cron |
-| 🟢 Medium | Dynamic Cron adjustment | Adjust scan frequency based on project activity |
-| 🟢 Medium | Multi-agent team support | Each agent (Tang Sanzang/Wukong/etc.) scans their own projects |
+```
+主人安装 auto-evolve
+    │
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│  每 N 分钟，cron 触发 scan                              │
+│                                                          │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  1. 读取项目当前状态                              │   │
+│  │     - 代码中有多少 TODO？                       │   │
+│  │     - 有多少重复代码？                          │   │
+│  │     - 测试覆盖率是多少？                        │   │
+│  └─────────────────────┬──────────────────────────────┘   │
+│                        ▼                                 │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  2. 读取 learnings（项目记忆）                  │   │
+│  │     - 之前哪些改动成功了？                      │   │
+│  │     - 哪些改动被拒绝了？原因是什么？            │   │
+│  │     - 主人偏好什么风格？                      │   │
+│  └─────────────────────┬──────────────────────────────┘   │
+│                        ▼                                 │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  3. 主人视角的判断                            │   │
+│  │     "还有什么不足, 有哪些地方可以优化,          │   │
+│  │      使用体验如何？"                            │   │
+│  └─────────────────────┬──────────────────────────────┘   │
+│                        ▼                                 │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  4. 决策 + 执行                                │   │
+│  │     低风险 → 自动执行 → 记录到 learnings        │   │
+│  │     中风险 → 开 PR → 等确认                    │   │
+│  │     高风险 → 跳过 → 通知主人                    │   │
+│  └────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Related Projects
+## 快速开始
 
-- [SoulForce](https://github.com/relunctance/soul-force) — AI agent memory evolution system
-- [hawk-bridge](https://github.com/relunctance/hawk-bridge) — Context memory integration for OpenClaw
+### 完整安装（推荐）
+
+```bash
+# 1. 安装 auto-evolve（核心引擎）
+clawhub install auto-evolve
+
+# 2. 安装 soul-force（提供 learnings + 记忆进化）
+clawhub install soul-force
+
+# 3. 安装 hawk-bridge（可选，提供向量语义记忆）
+clawhub install hawk-bridge
+
+# 4. 配置要巡检的项目
+python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force \
+  --type skill --monitor
+
+# 5. 设置自动巡检
+python3 scripts/auto-evolve.py set-mode full-auto
+python3 scripts/auto-evolve.py schedule --every 10
+```
+
+### 单独使用
+
+```bash
+# 只装 auto-evolve（无 learnings 能力）
+clawhub install auto-evolve
+
+# 只做预览，不执行任何改动
+python3 scripts/auto-evolve.py scan --dry-run
+```
+
+---
+
+## 巡检输出示例
+
+```
+🔍 Auto-Evolve Scanner [full-auto]
+==================================================
+
+📊 Project Status:
+   TODO: 12 → 9  (-3 resolved)
+   Duplicates: 8 → 5  (-3 resolved)
+   Test Coverage: 68% → 71%  (+3%)
+
+🎯 Product Insights:
+   🚫 [STOP_DOING] 主人拒绝了 3 次生成 test 文件 → 停止尝试
+   😤 [USER_COMPLAINT] 这个配置流程太麻烦，主人得手动做 5 步
+
+🔧 Auto-Executions:
+   ✅ duplicate_code: scripts/lua_def_file.py (P=0.68)
+   ✅ todo_cleanup: 3 empty TODOs removed
+   ⏭  pending approval: long_function in soulforge.py (127行)
+
+💾 Learnings: 3 approvals, 0 rejections recorded
+```
+
+---
+
+## 命令
+
+| 命令 | 说明 |
+|------|------|
+| `scan` | 巡检所有项目 |
+| `scan --dry-run` | 预览模式（不执行） |
+| `scan --recall-persona master` | 召回主人记忆巡检 |
+| `confirm` | 确认并执行待处理改动 |
+| `approve / reject` | 批准/拒绝（记录到 learnings） |
+| `set-mode full-auto` | 全自动化模式 |
+| `learnings` | 查看项目记忆 |
+| `rollback` | 回滚上一版本 |
+| `schedule --every 10` | 每 10 分钟自动巡检 |
+
+---
+
+## 安全机制
+
+- **版本控制**：所有改动有 git 历史，可回滚
+- **质量门槛**：Python pytest / JS jest 实际测试通过后才算成功
+- **learnings 过滤**：被拒绝的改动不会重复尝试
+- **隐私保护**：closed 仓库代码不外泄
+- **权限分离**：敏感操作需要主人确认
+
+---
+
+## 依赖说明
+
+Auto-Evolve 是一个巡检引擎，以下 skills 提供额外能力：
+
+| Skill | 版本 | 说明 |
+|-------|------|------|
+| auto-evolve | ≥3.5 | **必需**。核心巡检 + 执行引擎 |
+| soul-force | ≥2.2 | 推荐。提供 learnings 分析、每日记忆总结 |
+| hawk-bridge | any | 可选。向量语义记忆，按 persona 隔离 |
+
+---
+
+## 相关项目
+
+- [SoulForce](https://github.com/relunctance/soul-force) — AI Agent 记忆进化系统
+- [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw 上下文记忆集成
 
 ---
 
