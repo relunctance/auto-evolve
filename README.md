@@ -75,12 +75,46 @@ The result: AI that gets genuinely smarter over time, not just longer-lived.
 
 ### Installation
 
+**Option 1: Via ClawHub (recommended)**
+```bash
+# Install globally for all agents
+clawhub install auto-evolve
+
+# Or install to specific directory
+clawhub install auto-evolve --dir ~/.openclaw/workspace/skills
+```
+
+**Option 2: Via Git**
 ```bash
 # Clone the repo
 git clone https://github.com/relunctance/auto-evolve.git ~/.openclaw/workspace/skills/auto-evolve
 
 # Navigate to the skill directory
 cd ~/.openclaw/workspace/skills/auto-evolve
+```
+
+**Option 3: Via GitHub releases**
+```bash
+# Download latest release from GitHub
+# https://github.com/relunctance/auto-evolve/releases
+```
+
+### Post-Installation Setup
+
+```bash
+# Add repositories to monitor
+python3 scripts/auto-evolve.py repo-add /path/to/your/project --type skill --monitor
+
+# Set operation mode
+python3 scripts/auto-evolve.py set-mode full-auto  # Full-auto mode
+python3 scripts/auto-evolve.py set-mode semi-auto  # Semi-auto mode (confirm first)
+
+# Set auto-execute rules (for full-auto mode)
+python3 scripts/auto-evolve.py set-rules --low true --medium true
+
+# Schedule periodic scans
+python3 scripts/auto-evolve.py schedule --every 60  # Every 60 minutes
+python3 scripts/auto-evolve.py schedule --every 720  # Every 12 hours
 ```
 
 ### Basic Usage

@@ -75,12 +75,46 @@
 
 ### 安装
 
+**方式一：通过 ClawHub（推荐）**
+```bash
+# 全局安装，所有 Agent 可用
+clawhub install auto-evolve
+
+# 或安装到指定目录
+clawhub install auto-evolve --dir ~/.openclaw/workspace/skills
+```
+
+**方式二：通过 Git 克隆**
 ```bash
 # 克隆仓库
 git clone https://github.com/relunctance/auto-evolve.git ~/.openclaw/workspace/skills/auto-evolve
 
 # 进入目录
 cd ~/.openclaw/workspace/skills/auto-evolve
+```
+
+**方式三：通过 GitHub releases 下载**
+```bash
+# 访问以下地址下载最新版本
+# https://github.com/relunctance/auto-evolve/releases
+```
+
+### 安装后配置
+
+```bash
+# 添加要监控的仓库
+python3 scripts/auto-evolve.py repo-add /path/to/your/project --type skill --monitor
+
+# 设置运行模式
+python3 scripts/auto-evolve.py set-mode full-auto  # 全自动模式
+python3 scripts/auto-evolve.py set-mode semi-auto  # 半自动模式（确认后执行）
+
+# 设置自动执行规则（全自动模式）
+python3 scripts/auto-evolve.py set-rules --low true --medium true
+
+# 设置定时扫描
+python3 scripts/auto-evolve.py schedule --every 60   # 每 60 分钟
+python3 scripts/auto-evolve.py schedule --every 720  # 每 12 小时
 ```
 
 ### 基本使用
