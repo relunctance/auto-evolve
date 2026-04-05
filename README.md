@@ -1,4 +1,4 @@
-# Auto-Evolve v4.0
+# Auto-Evolve v4.3
 
 **Make your projects self-evolve — install once, they keep getting better.**
 
@@ -98,7 +98,7 @@ python3 scripts/auto-evolve.py schedule --every 10
 ## 🔍 Inspection Output Example
 
 ```
-🔍 Auto-Evolve Scanner v4.0
+🔍 Auto-Evolve Scanner v4.3
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📋 Project: soul-force (AI/Agent)
@@ -137,10 +137,13 @@ python3 scripts/auto-evolve.py schedule --every 10
 | `scan` | Inspect all projects |
 | `scan --dry-run` | Preview mode (no execution) |
 | `scan --recall-persona master` | Recall owner memory for inspection |
+| `scan --github-event pr_review` | Post results to GitHub |
 | `confirm` | Confirm and execute pending changes |
 | `approve / reject` | Approve/reject, record to learnings |
 | `set-mode full-auto` | Full automation mode |
-| `learnings` | View project memory |
+| `learnings` | View learning history |
+| `learnings --summary` | Summary statistics (v4.3) |
+| `trends --repo <path>` | Scan trend for a project (v4.3) |
 | `rollback` | Rollback to previous version |
 | `schedule --every 10` | Auto-inspect every 10 minutes |
 
@@ -181,7 +184,7 @@ Three layers stacked, Auto-Evolve gets better with every use.
 
 ---
 
-## How It Works (v4.0)
+## How It Works (v4.3)
 
 ```
 auto-evolve scan
@@ -196,19 +199,19 @@ auto-evolve scan
 ┌──────────────────────────────────────────────────────┐
 │  Step 2: Four-Perspective × Standards               │
 │                                                      │
-│  👤 USER    → user/user-perspective.md            │
-│  📦 PRODUCT → product-requirements.md               │
-│  🏗 PROJECT → project-inspection.md                │
-│  ⚙️ TECH   → code-standards.md                   │
+│  👤 USER    → user/user-perspective.md           │
+│  📦 PRODUCT → product-requirements.md              │
+│  🏗 PROJECT → project-inspection.md              │
+│  ⚙️ TECH   → code-standards.md                 │
 └──────────────────────┬───────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
 │  Step 3: Compare findings against reference docs    │
-│  Gap analysis → Prioritized report by perspective   │
+│  Trend tracking (v4.3): findings from last 10 scans│
 └──────────────────────────────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  Step 4: Read learnings, execute/notify/record      │
+│  Step 4: Execute / Notify / Record to learnings   │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -216,7 +219,7 @@ auto-evolve scan
 
 ## Related Projects
 
-- [project-standard](https://github.com/relunctance/gql-openclaw) — Four-perspective inspection standard library
+- [project-standard](https://github.com/relunctance/project-standard) — Four-perspective inspection standard library
 - [SoulForce](https://github.com/relunctance/soul-force) — AI Agent memory evolution system
 - [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw context memory integration
 
