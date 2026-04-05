@@ -60,6 +60,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+# Fix sys.path so we can import from scripts.helpers (for record_learning etc.)
+import sys as _sys
+_script_dir = str(Path(__file__).parent.parent)
+if _script_dir not in _sys.path:
+    _sys.path.insert(0, _script_dir)
+from scripts.helpers import record_learning, record_iteration_metrics
+
 
 # ===========================================================
 # Persona Detection & Workspace Resolution
@@ -4816,7 +4823,7 @@ def cmd_learnings(args) -> int:
         if not rejections:
             print("  (none)")
         for r in rejections[: args.limit or 20]:
-            print(f"  [{r['date']}] {r['repo'].split('/')[-1]}")
+            print(f"  [{r.get('date') or r.get('timestamp', 'unknown')[:10]}] {r.get('repo', '').split('/')[-1]}")
             print(f"    {r['description'][:70]}")
             if r.get("reason"):
                 print(f"    Reason: {r['reason']}")
@@ -4829,7 +4836,7 @@ def cmd_learnings(args) -> int:
         if not approvals:
             print("  (none)")
         for a in approvals[: args.limit or 20]:
-            print(f"  [{a['date']}] {a['repo'].split('/')[-1]}")
+            print(f"  [{a.get('date') or a.get('timestamp', 'unknown')[:10]}] {a.get('repo', '').split('/')[-1]}")
             print(f"    {a['description'][:70]}")
             if a.get("reason"):
                 print(f"    Reason: {a['reason']}")
@@ -5090,10 +5097,6 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    # Fix sys.path so we can import from scripts.helpers
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from scripts.helpers import record_learning, record_iteration_metrics
-    
     parser = _build_argument_parser()
     args = parser.parse_args()
 
