@@ -3810,34 +3810,19 @@ class FourPerspectiveScanner:
                                 repo_path: Path = None) -> str:
         """Format findings as GitHub-flavored markdown with trend summary.
 
-        v4.3: Includes trend comparison vs previous scan.
+        v4.4: Shows all four perspectives even on All Clear.
         """
         lines = [
             f"## 🔍 Auto-Evolve Scan Results (`{event}`)",
             "",
         ]
 
-        # Trend summary (P2: scan report aggregation)
+        # Trend summary
         if repo_path:
             trend = self._get_scan_trend(repo_path)
             if trend:
                 lines.append(trend)
                 lines.append("")
-
-        if not findings:
-            lines.append("✅ **All Clear** — No issues found across all four perspectives.")
-            lines.append("")
-            lines.append("_This project passed the auto-evolve inspection._")
-            lines.append("---")
-            lines.append("_Auto-evolved by [auto-evolve](https://github.com/relunctance/auto-evolve)_")
-            return "\n".join(lines)
-
-        lines.append(f"Found **{len(findings)}** finding(s):")
-        lines.append("")
-
-        by_perspective: dict[str, list["PerspectiveFinding"]] = {}
-        for f in findings:
-            by_perspective.setdefault(f.perspective, []).append(f)
 
         emoji_map = {"USER": "👤", "PRODUCT": "📦", "PROJECT": "🏗", "TECH": "⚙️"}
         label_map = {
@@ -3846,9 +3831,32 @@ class FourPerspectiveScanner:
             "PROJECT": "Project Perspective",
             "TECH": "Tech Perspective",
         }
+        all_perspectives = ["USER", "PRODUCT", "PROJECT", "TECH"]
 
-        for persp, persp_findings in by_perspective.items():
-            lines.append(f"### {emoji_map.get(persp, '📋')} {label_map.get(persp, persp)}")
+        if not findings:
+            lines.append("✅ **All Clear** — No issues found.")
+            lines.append("")
+            # Show all four perspectives were checked
+            for persp in all_perspectives:
+                lines.append(f"{emoji_map.get(persp, "📋")} {label_map.get(persp, persp)}: 0 findings")
+            lines.append("")
+            lines.append("_This project passed the auto-evolve inspection._")
+            lines.append("---")
+            lines.append("_Auto-evolved by [auto-evolve](https://github.com/relunctance/auto-evolve)_")
+            return "\n".join(lines)
+
+        # Group findings by perspective
+        by_perspective: dict[str, list["PerspectiveFinding"]] = {}
+        for f in findings:
+            by_perspective.setdefault(f.perspective, []).append(f)
+
+        lines.append(f"Found **{len(findings)}** finding(s) across {len(by_perspective)} perspective(s):")
+        lines.append("")
+
+        for persp in all_perspectives:
+            persp_findings = by_perspective.get(persp, [])
+            count = len(persp_findings)
+            lines.append(f"### {emoji_map.get(persp, "📋")} {label_map.get(persp, persp)} ({count} findings)")
             for f in persp_findings:
                 is_new = "[NEW]" in f.description
                 marker = "🆕 " if is_new else "  "
@@ -6489,39 +6497,46 @@ def cmd_learnings(args) -> int:
     if args.type == "rejections" or args.type is None:
         rejections = data.get("rejections", [])
         print(f"📕 Rejections ({len(rejections)} total):")
-        print("=" * 50)
+        print("=" * 60)
         if not rejections:
             print("  (none)")
         for r in rejections[: args.limit or 20]:
             ts = r.get("timestamp", "")
             date_str = ts[:10] if ts else "?"
             repo_name = r.get("repo", "?").split("/")[-1] or "?"
-            desc = r.get("description", "")[:70]
+            desc = r.get("description", "")
+            scenario = r.get("scenario", "")
+            suggested = r.get("suggested_direction", "")
+            impact = r.get("impact_score", 0)
             print(f"  [{date_str}] {repo_name}")
-            if desc:
-                print(f"    {desc}")
-            if r.get("reason"):
-                print(f"    Reason: {r.get('reason', '')}")
+            print(f"    {desc}")
+            if scenario:
+                print(f"    Scenario: {scenario}")
+            if suggested:
+                print(f"    → Fix: {suggested[:80]}")
+            if impact:
+                print(f"    Impact: {impact:.0%}")
             print()
 
     if args.type == "approvals" or args.type is None:
         approvals = data.get("approvals", [])
         print(f"📗 Approvals ({len(approvals)} total):")
-        print("=" * 50)
+        print("=" * 60)
         if not approvals:
             print("  (none)")
         for a in approvals[: args.limit or 20]:
             ts = a.get("timestamp", "")
             date_str = ts[:10] if ts else "?"
             repo_name = a.get("repo", "?").split("/")[-1] or "?"
-            desc = a.get("description", "")[:70]
+            desc = a.get("description", "")
+            scenario = a.get("scenario", "")
+            impact = a.get("impact_score", 0)
             print(f"  [{date_str}] {repo_name}")
-            if desc:
-                print(f"    {desc}")
-            if a.get("reason"):
-                print(f"    Reason: {a.get('reason', '')}")
-            if a.get("approved_by"):
-                print(f"    Approved by: {a.get('approved_by', '')}")
+            print(f"    {desc}")
+            if scenario:
+                print(f"    Scenario: {scenario}")
+            if impact:
+                print(f"    Impact: {impact:.0%}")
             print()
 
     if args.type not in ("rejections", "approvals", None):

@@ -23,6 +23,28 @@ jobs:
         with:
           path: main-repo
 
+      - name: Create auto-evolve label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = await github.rest.issues.listLabelsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            const hasLabel = labels.data.some(l => l.name === 'auto-evolve');
+            if (!hasLabel) {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'auto-evolve',
+                color: '1A73E8',
+                description: 'Auto-evolve scan findings'
+              });
+              console.log('Created auto-evolve label');
+            } else {
+              console.log('auto-evolve label already exists');
+            }
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -37,10 +59,10 @@ jobs:
         run: |
           if [ -n "${{ inputs.target_repo }}" ]; then
             TARGET="${{ github.workspace }}/${{ inputs.target_repo }}"
-            echo "path=$TARGET" >> $GITHUB_OUTPUT
           else
-            echo "path=${{ github.workspace }}/main-repo" >> $GITHUB_OUTPUT
+            TARGET="${{ github.workspace }}/main-repo"
           fi
+          echo "path=$TARGET" >> $GITHUB_OUTPUT
 
       - name: Run Auto-Evolve scan
         env:
