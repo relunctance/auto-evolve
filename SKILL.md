@@ -1,458 +1,295 @@
-# Auto-Evolve v3.5
+# Auto-Evolve v4.0
 
-**LLM-driven automated skill iteration manager with full audit trail.**
+**四视角自动化巡检与迭代管理器**
 
 > Make your skills continuously better -- automatically.
 
 ---
 
-## Overview
+## 核心理念
 
-Auto-Evolve v3.5 adds **PersonaAwareMemory** and **Master's Perspective** -- instead of asking "is the code clean?", it asks from the master's perspective: **"还有什么不足, 有哪些地方可以优化, 使用体验如何？"** to surface product-level insights.
+**auto-evolve 不只是一个代码扫描工具，而是一个"像人一样思考"的巡检伙伴。**
 
-```
-Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode Decision
-                     |                                                      |
-              [LLM suggests]              Semi-Auto                    Full-Auto
-              optimizations &            (confirm to exec)             (execute per rules)
-              refactoring hints
-```
+每次巡检时，auto-evolve 模拟收到了一条飞书消息：
 
-### v3.1 New Features
+> "你觉得这个项目还有什么可以改进的？有什么不足？"
 
-- **LLM-driven code analysis** -- uses OpenClaw configured LLM (no separate API key)
-- **Dependency awareness** -- tracks which files depend on changed files
-- **Test comparison** -- before/after test coverage delta
-- **Cherry-pick rollback** -- `rollback --to VERSION --item ID` reverts only specific item
-- **Multi-language support** -- Python, JavaScript, TypeScript, Go, Shell, Java
-- **Release management** -- `release --version 2.3.0` creates git tag + GitHub release
-- **Contributor tracking** -- shows auto-evolve vs manual commit ratio in `log`
-
-### v3.1 New Features
-
-- **EffectTracker** -- true before/after effect tracking: compares TODOs resolved, code lines, function count, duplicate lines, and coverage delta. Produces `effect.json` per iteration. Verdict: positive/neutral/negative.
-- **CostTracker** -- LLM call cost tracking with pricing table (MiniMax-M2, GPT-4, Claude, etc.). Records each call to `llm_calls.jsonl`. Aggregates cost in `catalog.json`. `effects` and `costs` commands to inspect.
-- **IssueLinker** -- after each commit (auto or approved), finds open GitHub issues referencing changed files and auto-closes them with a comment. Powered by `gh issue list --json`.
-- **SmartScheduler** -- activity-based scan frequency. `schedule --suggest` shows per-repo recommendations; `schedule --auto` applies them. Active repos (20+ commits/week) → 24h; active (10+) → 72h; normal (3+) → 168h; idle → 336h.
-- **`effects` command** -- view effect tracking reports for recent iterations
-- **`costs` command** -- view LLM cost breakdown by iteration and model
+然后它会从四个视角逐一审视，形成真实的观点，而不是机械地报问题。
 
 ---
 
-## v3.5 New Features
+## 巡检工作流（v4.0）
 
-### 🎯 Master's Perspective Scanning
-
-Auto-Evolve v3.5 asks **from the master's perspective**:
-
-> "还有什么不足, 有哪些地方可以优化, 使用体验如何？"
-
-Every scan carries the master's context:
-- **Master's context**: reads SOUL.md, USER.md, IDENTITY.md for values/preferences
-- **Master's preferences**: recalled from OpenClaw SQLite + hawk-bridge LanceDB
-- **Learning history**: previously rejected/approved changes avoid repeated mistakes
-
-### 🧠 PersonaAwareMemory
-
-Dual memory system with graceful degradation:
-
-| Source | Priority | Description |
-|--------|---------|-------------|
-| OpenClaw SQLite | Primary | `memory/{persona}.sqlite`, structured, reliable |
-| hawk-bridge LanceDB | Supplement | Vector semantic search, persona-isolated |
-
-### 🔧 CLI Memory Controls
-
-```bash
-# Default: auto-detect persona, openclaw primary + hawkbridge supplement
-python3 scripts/auto-evolve.py scan --dry-run
-
-# Tang Sanzang recalls master's memories
-python3 scripts/auto-evolve.py scan --dry-run --recall-persona master
-
-# Force OpenClaw SQLite only
-python3 scripts/auto-evolve.py scan --dry-run --memory-source openclaw
-
-# Merge both sources
-python3 scripts/auto-evolve.py scan --dry-run --memory-source both
+```
+auto-evolve 扫描项目
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│  Step 1: project-standard 项目类型判断               │
+│  判断项目类型（Skill / CLI / Python库 / Web / 通用）  │
+│  确定该类型适用的巡检标准 + 视角权重                 │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│  Step 2: 四视角巡检                                 │
+│                                                     │
+│  👤 USER    → user/user-perspective.md（标准）     │
+│  📦 PRODUCT → product-requirements.md（标准）     │
+│  🏗 PROJECT → project-inspection.md（标准）         │
+│  ⚙️ TECH   → code-standards.md（标准）            │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│  Step 3: project-standard reference docs            │
+│  作为评判标准，输出巡检报告                          │
+└─────────────────────────────────────────────────────┘
 ```
 
-### 📊 Product Insights with why_now
+### 与 project-standard 的关系
 
-Product findings now include `why_now` and `suggested_direction`:
-```
-🎯 Product Evolution Insights (from 4 finding(s)):
-  1. 🚫 [STOP_DOING]
-     missing_test optimization rejected by master 3 times
-     Impact: ████████░░ 0.8
-     → Stop auto-generating test files
-     ⏱ Every generation was rejected, wasting LLM calls
-```
-
-### 🔍 Cross-File Structural Duplicate Detection
-
-Detects **structurally similar** functions across files, not just identical strings.
-Uses line-level MD5 hashing to group similar code blocks.
-
-### ⚡ Real Quality Gates
-
-Quality gates now run actual tests:
-- Python: `pytest --cov` (not just `py_compile`)
-- JavaScript/TypeScript: `jest`
-- Failure triggers automatic git revert rollback
+| 组件 | 职责 |
+|------|------|
+| **project-standard** | 提供项目分类标准 + 四视角框架 + reference docs（评判标准） |
+| **auto-evolve** | 读取标准、执行巡检、记录 learnings、落地改进 |
 
 ---
 
-## Commands
+## 四视角巡检框架
+
+```
+┌─────────────────────────────────────────────────────┐
+│              auto-evolve 巡检框架 v4.0               │
+├──────────────┬──────────────────┬───────────────────┤
+│   用户视角     │     产品视角       │     项目视角        │    技术视角        │
+│  "好用吗？"   │  "解决问题了吗？"   │   "运作得好吗？"    │   "代码健康吗？"   │
+├──────────────┼──────────────────┼───────────────────┼──────────────────┤
+│ CLI 设计      │ 功能完整性        │ learnings 闭环     │ 代码质量          │
+│ 学习门槛      │ 承诺兑现度        │ 巡检历史          │ 架构设计          │
+│ 错误提示      │ 痛点解决度        │ 配置合理性         │ 测试覆盖          │
+│ 容错性        │ 用户反馈闭环       │ 迭代节奏          │ 依赖管理          │
+│ 操作流程度    │ 文档与实际一致     │ 团队协作          │ 性能              │
+│ ⬆️ 评判标准: user/user-perspective.md              │
+└──────────────┴──────────────────┴───────────────────┴──────────────────┘
+```
+
+### 优先级：用户 > 产品 > 项目 > 技术
+
+**为什么这样排序？**
+- 用户体验是项目存在的根本
+- 产品视角确保"说到做到"
+- 项目视角确保"持续改进有闭环"
+- 技术视角是基础，但不应该是主角
+
+---
+
+## 四视角详解
+
+### 👤 用户视角（User Perspective）
+
+**核心问题：这个工具用起来顺手吗？**
+
+| 问什么 | 发现什么 |
+|--------|---------|
+| CLI 参数设计 | 参数名不直观、缺少默认值 |
+| 学习门槛 | 新人上手要多久？文档够吗？ |
+| 错误提示 | 报错是说人话还是说机器话？ |
+| 容错性 | 某个环节失败了会怎样？ |
+| 操作流程度 | 完成一个操作要几步？能否更简单？ |
+
+**输出示例**：
+> `[USER] Impact 0.7` — `--dry-run` 在 `review` 子命令下不可用，用户以为可以dry-run结果直接写了文件
+
+### 📦 产品视角（Product Perspective）
+
+**核心问题：这个项目声称解决什么，实际做到了吗？**
+
+| 问什么 | 发现什么 |
+|--------|---------|
+| README 承诺 | README 里写的功能，实际做到了吗？ |
+| 痛点解决度 | 文档里标记的 ❌ 痛点，哪些还没解决？ |
+| 功能完整性 | 声称的 feature 是完整实现还是半成品？ |
+| 文档一致性 | 文档和代码说的是同一件事吗？ |
+
+**输出示例**：
+> `[PRODUCT] Impact 0.8` — README 声称"LLM fallback 机制"，但代码里没有 fallback，一旦 API 失败整个工具直接失效
+
+### 🏗 项目视角（Project Perspective）
+
+**核心问题：这个项目的运作方式健康吗？**
+
+| 问什么 | 发现什么 |
+|--------|---------|
+| learnings 闭环 | 上次发现的问题追踪了吗？learnings 有积累吗？ |
+| 巡检历史 | 巡检了多少次？有形成迭代节奏吗？ |
+| 配置合理性 | 配置项是否合理？有无过度配置？ |
+| 依赖管理 | 依赖是否过多、过旧、有安全风险？ |
+
+**输出示例**：
+> `[PROJECT] Impact 0.5` — 上次巡检发现的问题（3个）在本次巡检时没有任何标记或追踪
+
+### ⚙️ 技术视角（Tech Perspective）
+
+**核心问题：代码本身健康吗？**
+
+| 问什么 | 发现什么 |
+|--------|---------|
+| 代码质量 | 重复代码、长函数、坏味道 |
+| 架构设计 | 模块间耦合是否合理？ |
+| 测试覆盖 | 核心逻辑有测试吗？ |
+| 性能 | 有无明显的性能问题？ |
+
+**注意**：技术视角优先级最低，是"锦上添花"而不是"主角"。
+
+---
+
+## 巡检流程
+
+```
+收到消息："这个项目还有什么可以改进的？"
+
+    ↓
+┌──────────────────────────────────────┐
+│  Step 1: project-standard 项目类型判断  │
+│  · 判断项目类型（Skill / CLI / 库 / Web）│
+│  · 确定视角权重（不同类型权重不同）       │
+└──────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────┐
+│  Step 2: 四视角巡检（并发）             │
+│  · USER    → 参考 user-perspective.md │
+│  · PRODUCT → 参考 product-requirements.md│
+│  · PROJECT → 参考 project-inspection.md│
+│  · TECH   → 参考 code-standards.md    │
+└──────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────┐
+│  Step 3: 优先级排序 + 报告             │
+│  · 按视角分组                          │
+│  · 按 Impact 排序                      │
+│  · 引用 project-standard 标准做评判     │
+└──────────────────────────────────────┘
+```
+
+---
+
+## 巡检报告格式
+
+```
+📋 auto-evolve 巡检报告 — soul-force
+生成时间: 2026-04-05 22:30
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 用户视角 ★★★★★
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. 🚨 Impact 0.7
+     review 命令不支持 --dry-run，用户以为不会写文件
+     结果直接修改了 SOUL.md
+     → 建议：review 也支持 --dry-run，或在文档中明确说明
+
+  2. ⚠️  Impact 0.5
+     错误提示只有 "Error: something went wrong"
+     用户无法判断是什么问题
+     → 建议：分层错误提示，分清"配置错误"和"运行时错误"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📦 产品视角 ★★★★
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. 🚨 Impact 0.8
+     README 承诺 "LLM fallback"，实际代码没有 fallback
+     API 失败时工具直接失效
+     → 建议：实现基于关键词的简单规则引擎作为 fallback
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏗 项目视角 ★★★
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. ⚠️  Impact 0.6
+     learnings 历史没有被用于指导巡检优先级
+     重复被拒绝的问题仍然反复出现
+     → 建议：learnings 应影响巡检的发现排序
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️ 技术视角 ★★
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [opt] 🟡 duplicate_code: SoulForgeConfig 初始化重复 15 次
+  [opt] 🟡 long_function: main() 154 行
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 行动建议
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  【立即处理】产品视角：实现 LLM fallback（影响最大）
+  【本周处理】用户视角：review 支持 --dry-run
+  【可选】    技术视角：提取公共初始化函数
+```
+
+---
+
+## 命令
 
 ### scan
 
-Scans all configured repositories for changes and optimization opportunities.
-
 ```bash
+# 扫描所有配置的仓库
 python3 auto-evolve.py scan
+
+# 单仓库扫描
+python3 auto-evolve.py scan --repo /path/to/repo
+
+# 预览模式（不执行）
 python3 auto-evolve.py scan --dry-run
-python3 auto-evolve.py scan --dry-run --recall-persona master --memory-source both
+
+# 指定回忆的记忆 persona
+python3 auto-evolve.py scan --recall-persona master
 ```
-
-**v3.5 CLI Args:**
-- `--recall-persona`: Whose memory to recall (main/tseng/wukong/bajie/bailong/master, default: auto-detect)
-- `--memory-source`: Memory source (auto/openclaw/hawkbridge/both, default: auto)
-
-**v3.0: Language Detection**
-Automatically detects repository languages and uses appropriate TODO patterns.
-
-**v3.0: Dependency Analysis**
-Reports which files depend on changed files before applying:
-```
-  [!] Dependency Alert: Changing: soulforge/analyzer.py
-     May affect: soulforge/evolver.py (imports analyzer)
-```
-
-**v3.0: LLM Analysis**
-Top 5 pending items analyzed by the configured LLM. Results include:
-- LLM suggestion for each change
-- Risk level adjustment if LLM disagrees
-- Implementation hints
-
-Output includes `[LLM]` prefix for analyzed items.
-
-**What it scans:**
-- Git changes (added, modified, removed, untracked)
-- TODO/FIXME/XXX/HACK/NOTE (multi-language patterns)
-- Duplicate string patterns (3+ occurrences)
-- Long functions (>100 lines) -- Python, JS, TS, Go
-- Missing test coverage
-- Pinned/outdated dependencies
 
 ---
 
-### confirm
+### confirm / reject / approve
 
-Confirm and execute pending changes in semi-auto mode.
+在 semi-auto 模式下确认或拒绝巡检发现。
 
 ```bash
 python3 auto-evolve.py confirm
-python3 auto-evolve.py confirm --iteration 20260405-120000
+python3 auto-evolve.py reject 2 --reason "too risky"
+python3 auto-evolve.py approve 1,3
 ```
 
 ---
 
-### reject
-
-Reject a pending change and record in learning history.
-
-```bash
-auto-evolve.py reject 2 --reason "too risky"
-```
-
----
-
-### approve
-
-Approve and execute pending changes.
-
-```bash
-# Approve all with reason
-auto-evolve.py approve --all --reason "valuable improvement"
-
-# Approve specific items
-auto-evolve.py approve 1,3
-
-# From specific iteration
-auto-evolve.py approve --all --iteration 20260405-120000
-```
-
----
-
-### repo-add
-
-Add a repository to the monitoring list.
+### repo-add / repo-list
 
 ```bash
 python3 auto-evolve.py repo-add ~/.openclaw/workspace/skills/hawk-bridge --type skill
-```
-
-Repository types: `skill` | `norms` | `project` | `closed`
-
----
-
-### repo-list
-
-List all configured repositories. v3.0 shows detected languages.
-
-```bash
 python3 auto-evolve.py repo-list
 ```
-
----
-
-### rollback
-
-**v3.0: Cherry-pick rollback -- revert specific items without full revert.**
-
-```bash
-# Full rollback of an iteration
-auto-evolve.py rollback --to 20260405-120000 --reason "broke feature X"
-
-# Cherry-pick: only rollback item #3
-auto-evolve.py rollback --to 20260405-120000 --item 3
-```
-
----
-
-### release (v3.0)
-
-Create a GitHub release with git tag + gh CLI.
-
-```bash
-auto-evolve.py release --version 2.3.0
-auto-evolve.py release --version 2.3.0 --changelog "## What's New\n- Feature A"
-```
-
-Flow:
-1. Creates `v{version}` git tag
-2. Pushes tag to `origin`
-3. Creates GitHub release via `gh release create`
 
 ---
 
 ### schedule
 
 ```bash
-# Set scan interval (creates cron automatically)
-auto-evolve.py schedule --every 168
+# 设置扫描间隔
+python3 auto-evolve.py schedule --every 168
 
-# Show smart scheduling recommendations (v3.1)
-auto-evolve.py schedule --suggest
-
-# Apply recommended intervals based on activity (v3.1)
-auto-evolve.py schedule --auto
-
-# Show current schedule
-auto-evolve.py schedule --show
-
-# Remove cron job
-auto-evolve.py schedule --remove
+# 查看智能调度建议
+python3 auto-evolve.py schedule --suggest
 ```
-
-**v3.1 Smart Scheduling:**
-| Activity | Commits/7d | Recommended Interval |
-|----------|------------|---------------------|
-| 🔥 very_active | ≥20 | 24h |
-| ⚡ active | ≥10 | 72h |
-| 📅 normal | ≥3 | 168h (1 week) |
-| 💤 idle | <3 | 336h (2 weeks) |
 
 ---
 
 ### learnings
 
-View learning history.
+查看学习历史（被拒绝/批准过的决策）。
 
 ```bash
-auto-evolve.py learnings
-auto-evolve.py learnings --type rejections
-auto-evolve.py learnings --type approvals --limit 10
+python3 auto-evolve.py learnings
+python3 auto-evolve.py learnings --type rejections
 ```
 
 ---
 
-### log
+## 配置
 
-**v3.0: Shows contributor stats and test coverage delta.**
-
-```bash
-auto-evolve.py log --limit 5
-```
-
-Example output:
-```
-[check] 20260405-120000 [METRICS] [C]8A/15M
-   Date: 2026-04-05T12:00:00+08:00
-   Status: completed
-   Auto: 3 | Approved: 5
-```
-
-`[C] 8A/15M` = 8 auto-evolve commits / 15 manual commits
-
----
-
-### effects (v3.1)
-
-View effect tracking reports showing before/after impact of iterations.
-
-```bash
-auto-evolve.py effects
-auto-evolve.py effects --iteration 20260405-120000
-```
-
-Effect reports include: TODOs resolved, coverage delta, duplicate lines removed, code lines change, function count change. Verdict: positive/neutral/negative.
-
----
-
-### costs (v3.1)
-
-View LLM cost breakdown per iteration and per model.
-
-```bash
-auto-evolve.py costs
-auto-evolve.py costs --iteration 20260405-120000
-```
-
-Includes per-model pricing (MiniMax-M2, GPT-4, Claude, etc.), token counts, and total USD cost.
-
----
-
-## Priority Scoring
-
-Changes ranked by **P = (value x 0.5) / (risk x cost)**
-
-| Factor | Range | Meaning |
-|--------|-------|---------|
-| Value | 1-10 | Bug fix=10, test=7, docs=4 |
-| Risk | 1-10 | Low=2, Medium=5, High=9 |
-| Cost | 1-10 | 5min=1, 1h=7, 2h+=10 |
-
----
-
-## LLM Integration (v3.0)
-
-Auto-Evolve v3.0 uses OpenClaw's configured LLM -- no separate API key needed.
-
-### How it works
-
-1. After scanning, top 5 pending items sorted by priority
-2. For each item, reads the file and sends to LLM with context
-3. LLM returns: suggestion, risk_level, implementation_hint
-4. If LLM suggests different risk level, priority is recalculated
-5. LLM results stored in pending-review.json
-
-### Config Priority
-
-1. Environment: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
-2. Fallback: `MINIMAX_API_KEY`, `MINIMAX_BASE_URL`
-3. `openclaw config get llm` as last resort
-
----
-
-## Dependency Analysis (v3.0)
-
-When git changes are detected, auto-evolve:
-1. Scans all files for `import`/`require`/`from` statements
-2. Builds a dependency map
-3. For each changed file, finds files that import it
-4. Shows warnings before applying changes that affect dependents
-
-### Supported Languages
-
-| Language | Import Syntax |
-|----------|---------------|
-| Python | `import X`, `from X import Y` |
-| JavaScript/TypeScript | `require('X')`, `import from 'X'` |
-| Go | `import "X"` |
-| Java | `import X.Y.Z;` |
-
----
-
-## Multi-Language TODO Patterns (v3.0)
-
-| Extension | Patterns |
-|-----------|----------|
-| `.py` | `# TODO`, `# FIXME`, `# XXX`, `# HACK`, `# NOTE` |
-| `.js` / `.ts` | `// TODO`, `// FIXME`, `// XXX`, `// HACK`, `/* TODO */` |
-| `.go` | `// TODO`, `// FIXME`, `// XXX` |
-| `.sh` | `# TODO`, `# FIXME`, `# XXX` |
-| `.java` | `// TODO`, `// FIXME`, `// XXX`, `/* TODO */` |
-| `.md` | `<!-- TODO -->`, `[TODO]`, `- [ ]` |
-
----
-
-## Test Comparison (v3.0)
-
-Run tests at two git refs and compare coverage:
-
-```python
-result = run_test_comparison(repo, before_hash, after_hash)
-# Returns:
-# {
-#   "before_coverage": 72.5,
-#   "after_coverage": 74.2,
-#   "delta": +1.7,
-#   "tests_passed": True
-# }
-```
-
-Results stored in `metrics.json` as `test_coverage_delta`.
-
-Requires: `pytest` and `coverage` plugin.
-
----
-
-## Release Management (v3.0)
-
-```bash
-auto-evolve.py release --version 2.3.0 [--changelog "..."]
-```
-
-Creates:
-1. Git tag `v2.3.0` with message
-2. Pushes tag to `origin`
-3. Creates GitHub release via `gh release create`
-
----
-
-## Contributor Tracking (v3.0)
-
-`track_contributors()` scans git log and distinguishes:
-- **auto commits**: messages starting with `auto:` or `auto-evolve:`
-- **manual commits**: everything else
-
-Stats shown in `log` output and stored in iteration manifest.
-
----
-
-## Iteration Record Format
-
-```
-.auto-evolve/
-  .iterations/
-    {id}/
-      manifest.json        -- Metadata + pending items (v3.1: llm_calls, total_cost_usd)
-      plan.md             -- Plan with all changes
-      pending-review.json -- Items awaiting review (v3.0: llm_analysis, affected_files)
-      report.md           -- Execution results
-      metrics.json        -- Iteration metrics (v3.0: test_coverage_delta)
-      alert.json          -- Quality gate alert (if any)
-      effect.json         -- Before/after effect tracking (v3.1)
-      llm_calls.jsonl     -- LLM call records (v3.1, one JSON per line)
-```
-
----
-
-## Configuration
-
-File: `~/.auto-evolverc.json`
+`~/.auto-evolverc.json`
 
 ```json
 {
@@ -463,35 +300,38 @@ File: `~/.auto-evolverc.json`
     "execute_high_risk": false
   },
   "schedule_interval_hours": 168,
-  "schedule_cron_id": null,
   "repositories": [
     {
-      "path": "~/.openclaw/workspace/skills/soul-force",
+      "path": "/path/to/repo",
       "type": "skill",
       "visibility": "public",
-      "auto_monitor": true,
-      "scan_interval_hours": 168
+      "auto_monitor": true
     }
-  ],
-  "notification": {
-    "mode": "log",
-    "log_file": "~/.auto-evolve-notifications.log"
-  },
-  "git": {
-    "remote": "origin",
-    "branch": "main",
-    "pr_branch_prefix": "auto-evolve"
-  }
+  ]
 }
 ```
 
 ---
 
-## Requirements
+## LLM 集成
 
-- Python 3.10+
-- Git
-- `gh` CLI (for PR creation and releases)
-- `openclaw` CLI (for cron integration and LLM config)
-- `pytest` + `coverage` (optional, for test comparison)
-- `lancedb` (optional, for hawk-bridge vector memory integration)
+auto-evolve 使用 OpenClaw 配置的 LLM，无需单独 API key。
+
+配置优先级：
+1. 环境变量 `OPENAI_API_KEY` / `MINIMAX_API_KEY`
+2. `openclaw config get llm`
+
+---
+
+## 迭代记录格式
+
+```
+.auto-evolve/
+  .iterations/
+    {id}/
+      manifest.json       -- 元数据 + 发现列表
+      plan.md            -- 执行计划
+      pending-review.json -- 待审查项目
+      report.md          -- 执行报告
+      metrics.json       -- 迭代指标
+```

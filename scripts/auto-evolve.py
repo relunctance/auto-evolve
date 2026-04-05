@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Auto-Evolve v3.6 — Automated skill iteration manager.
+Auto-Evolve v3.9 — Four-perspective automated skill scanner.
 
 Features (v3.5):
 - PersonaAwareMemory: openclaw SQLite primary + hawkbridge LanceDB supplement
 - Cross-persona workspace: recall context from any persona's workspace
 - CLI args: --recall-persona, --memory-source (auto|openclaw|hawkbridge|both)
-- ProductThinkingScanner: asks "what is broken for users?" not "is code clean?"
+- FourPerspectiveScanner: USER / PRODUCT / PROJECT / TECH four-angle scan
 - EffectTracker: true before/after effect tracking per iteration
 - CostTracker: LLM call cost tracking with pricing table
 - IssueLinker: auto-close GitHub issues related to committed changes
@@ -3179,10 +3179,25 @@ PRODUCT_CATEGORIES = (
 
 
 @dataclass
-class ProductThinkingFinding:
-    """A product-level insight about what should evolve, not just what should be cleaned up."""
+@dataclass
+class PerspectiveFinding:
+    """
+    A finding from one of the four perspectives of the auto-evolve scan.
+
+    Attributes:
+        perspective: USER | PRODUCT | PROJECT | TECH
+        description: what was found (in Chinese, human-readable)
+        category: nature of the finding
+        evidence: supporting snippets from code/docs
+        impact_score: 0.0-1.0, how much this hurts users or the project
+        suggested_direction: concrete next step in Chinese
+        file_path: relevant file or '' if project-wide
+        risk: risk level
+        why_now: why this matters right now
+    """
     description: str
-    category: str
+    perspective: str          # USER | PRODUCT | PROJECT | TECH
+    category: str             # nature of finding
     evidence: list[str]
     impact_score: float
     suggested_direction: str
@@ -3260,25 +3275,34 @@ class FileAnalysisCache:
 
 
 # ===========================================================
-# ProductThinkingScanner (v3.6)
-# Phase 1: Product docs — README/SKILL.md → extract pain points → ask LLM what's still broken
-# Phase 2: Code files — implementation quality (secondary, lower priority)
+# FourPerspectiveScanner (v3.9)
+# Asks: "这个项目还有什么可以改进的？" from four distinct angles:
+#   👤 USER    — Is it easy/best to use?
+#   📦 PRODUCT — Does it actually solve what it claims?
+#   🏗 PROJECT — Is it运作得好 (learnings, schedule, config)?
+#   ⚙️ TECH   — Is the code healthy?
 # ===========================================================
 
-class ProductThinkingScanner:
+# Perspective labels and display info
+PERSPECTIVE_META = {
+    "USER":    {"icon": "👤", "label": "用户视角", "stars": 5},
+    "PRODUCT": {"icon": "📦", "label": "产品视角", "stars": 4},
+    "PROJECT": {"icon": "🏗", "label": "项目视角", "stars": 3},
+    "TECH":    {"icon": "⚙️", "label": "技术视角", "stars": 2},
+}
+
+
+class FourPerspectiveScanner:
     """
-    Scans from the PRODUCT perspective: what does the project CLAIM to solve,
-    and which of those problems are actually still broken?
+    Runs four scanners concurrently (conceptually), one per perspective.
 
-    Phase 1 (high priority): Read README/SKILL.md, extract documented pain points,
-      ask LLM which ones are still unresolved.
-    Phase 2 (lower priority): Scan code files for implementation quality issues.
-
-    This is NOT a code quality scanner — code quality is secondary to product truth.
+    Each perspective asks a different question and produces findings
+    tagged with its perspective label.  Findings are later grouped
+    and displayed by perspective in the report.
     """
 
     BATCH_SIZE = 5
-    DOC_BATCH_SIZE = 3   # doc files are larger, fewer per batch
+    DOC_BATCH_SIZE = 3
 
     def __init__(self, repos: list[Repository], config: dict,
                  recall_persona: str = "", memory_source: str = "auto") -> None:
@@ -3292,6 +3316,143 @@ class ProductThinkingScanner:
         self.effective_persona = self.memory.context_persona
         self.learnings = self._load_learnings_context()
         self._cache = FileAnalysisCache()
+        # Load project-standard reference docs (评判标准)
+        self._project_standard_docs = self._load_project_standard_docs()
+
+    # ---- project-standard integration ---------------------------------------
+
+    # Map each perspective to its reference doc
+    PERSPECTIVE_REF_DOCS = {
+        "USER":    "references/user/user-perspective.md",
+        "PRODUCT": "references/product-requirements.md",
+        "PROJECT": "references/project-inspection.md",
+        "TECH":    "references/code-standards.md",
+    }
+
+    def _load_project_standard_docs(self) -> dict[str, str]:
+        """Load project-standard reference docs from the skills directory."""
+        # Find project-standard skill directory
+        skill_dirs = [
+            Path.home() / ".openclaw" / "workspace" / "skills" / "project-standard",
+            Path.home() / ".openclaw" / "skills" / "project-standard",
+        ]
+        ps_dir = None
+        for d in skill_dirs:
+            if d.exists():
+                ps_dir = d
+                break
+
+        docs = {}
+        if ps_dir is None:
+            print("[FourPerspectiveScanner] WARNING: project-standard not found, using internal standards")
+            return docs
+
+        print(f"[FourPerspectiveScanner] Loading project-standard from {ps_dir}")
+        for perspective, rel_path in self.PERSPECTIVE_REF_DOCS.items():
+            file_path = ps_dir / rel_path
+            if file_path.exists():
+                try:
+                    docs[perspective] = file_path.read_text(encoding="utf-8")
+                    print(f"  ✓ Loaded {perspective} → {rel_path}")
+                except OSError as e:
+                    print(f"  ✗ Failed to load {rel_path}: {e}")
+            else:
+                print(f"  - Skipped {rel_path} (not found)")
+        return docs
+
+    def _detect_project_type(self, repo_path: Path) -> tuple[str, str]:
+        """
+        Detect project type using project-standard's v2.0 two-level classification.
+        Level 1: Business form (determines inspection weights)
+        Level 2: Tech stack (determines specific check items)
+        Returns (level1_type, perspective_weights).
+        Falls back to '通用项目' if project-standard unavailable.
+        """
+        # Scan for key files to determine business form
+        has_skill = (repo_path / "SKILL.md").exists()
+        has_meta = (repo_path / "_meta.json").exists() or (repo_path / "skill.json").exists()
+        has_skill_json = (repo_path / "agent.json").exists()
+
+        # Frontend indicators
+        has_index = (repo_path / "index.html").exists()
+        has_pages = (repo_path / "pages").exists() or (repo_path / "src" / "pages").exists()
+        has_templates = (repo_path / "templates").exists()
+        has_static = (repo_path / "static").exists()
+        has_frontend = (repo_path / "frontend").exists()
+        has_mobile = any((repo_path / d).exists() for d in ["ios", "android", "flutter", "react-native", "src-tauri"])
+        has_desktop = any((repo_path / d).exists() for d in ["electron", "tauri", "windows", "macos"])
+        has_plugin = (repo_path / "manifest.json").exists() or (repo_path / ".vsix").exists()
+        has_weapp = any((repo_path / d).exists() for d in ["miniprogram", "wechat", "alipay"])
+
+        # Backend indicators
+        has_api = any((repo_path / d).exists() for d in ["routes", "controllers", "api", "grpc"])
+        has_openapi = (repo_path / "openapi.yaml").exists() or (repo_path / "openapi.yml").exists()
+        has_proto = any(repo_path.rglob("*.proto"))
+        has_microservice = any((repo_path / d).exists() for d in ["service", "registry", "consul"])
+        has_cli = (repo_path / "main.py").exists() or (repo_path / "main.go").exists()
+        has_cli_indicator = (repo_path / "cli.py").exists() or (repo_path / "__main__.py").exists()
+        has_console_scripts = (repo_path / "setup.py").exists() or (repo_path / "pyproject.toml").exists()
+        has_middleware = any((repo_path / d).exists() for d in ["middleware", "broker", "queue"])
+        has_docker = (repo_path / "Dockerfile").exists() or (repo_path / "docker-compose.yml").exists()
+        has_ci = any((repo_path / f).exists() for f in [".gitlab-ci.yml", "Jenkinsfile", ".github/workflows"])
+
+        # AI/ML indicators
+        has_llm = any((repo_path / d).exists() for d in ["llm", "model", "inference", "prompt"])
+        has_features = (repo_path / "features").exists() or (repo_path / "models").exists()
+        has_notebooks = (repo_path / "notebooks").exists()
+        has_dvc = (repo_path / "dvc.yaml").exists()
+        has_etl = any((repo_path / d).exists() for d in ["etl", "pipeline", "airflow", "dbt"])
+
+        # Infrastructure indicators
+        has_firmware = any((repo_path / d).exists() for d in ["firmware", "arduino", "platformio", "embedded"])
+        has_solidity = any((repo_path / d).exists() for d in ["contracts", "solidity", "hardhat"])
+
+        # Content/Docs indicators
+        has_docs = any((repo_path / d).exists() for d in ["docs", "documentation"])
+        has_vitepress = (repo_path / ".vitepress").exists()
+        has_mkdocs = (repo_path / "mkdocs.yml").exists()
+        has_docusaurus = (repo_path / "docusaurus").exists()
+        has_posts = (repo_path / "_posts").exists()
+        has_swagger = (repo_path / "swagger").exists() or (repo_path / "postman").exists()
+
+        # Python library indicator
+        has_pyproject = (repo_path / "pyproject.toml").exists()
+        has_setup = (repo_path / "setup.py").exists()
+        has_src_import = (repo_path / "src").exists() or any(
+            (repo_path / "src").exists() for _ in [1]
+        )
+
+        # === Level 1 Business Form Detection ===
+        # Order matters: more specific first
+        if (has_skill or has_meta or has_skill_json) and ("skill" in str(repo_path).lower() or "agent" in str(repo_path).lower()):
+            return ("智能体/AI", "用户 25% / 产品 30% / 项目 20% / 技术 25%")
+        elif has_llm or has_features or has_notebooks or has_dvc or has_etl:
+            if has_features or has_notebooks or has_dvc:
+                return ("智能体/AI", "用户 25% / 产品 30% / 项目 20% / 技术 25%")
+            elif has_etl:
+                return ("基础设施", "用户 15% / 产品 20% / 项目 25% / 技术 40%")
+            else:
+                return ("智能体/AI", "用户 25% / 产品 30% / 项目 20% / 技术 25%")
+        elif has_firmware or has_solidity:
+            return ("基础设施", "用户 15% / 产品 20% / 项目 25% / 技术 40%")
+        elif has_mobile or has_desktop or has_weapp or has_plugin:
+            return ("前端应用", "用户 35% / 产品 25% / 项目 15% / 技术 25%")
+        elif has_index or has_pages or has_templates or has_static or has_frontend:
+            return ("前端应用", "用户 35% / 产品 25% / 项目 15% / 技术 25%")
+        elif has_api or has_openapi or has_proto or has_microservice:
+            return ("后端服务", "用户 25% / 产品 20% / 项目 20% / 技术 35%")
+        elif has_cli or has_cli_indicator or (has_console_scripts and has_cli):
+            return ("后端服务", "用户 25% / 产品 20% / 项目 20% / 技术 35%")
+        elif has_middleware or has_docker or has_ci:
+            return ("后端服务", "用户 25% / 产品 20% / 项目 20% / 技术 35%")
+        elif has_vitepress or has_mkdocs or has_docusaurus or has_docs:
+            return ("内容与文档", "用户 30% / 产品 35% / 项目 20% / 技术 15%")
+        elif has_posts or has_swagger:
+            return ("内容与文档", "用户 30% / 产品 35% / 项目 20% / 技术 15%")
+        elif has_pyproject and (has_setup or has_src_import):
+            return ("后端服务", "用户 25% / 产品 20% / 项目 20% / 技术 35%")
+        else:
+            return ("通用项目", "用户 25% / 产品 25% / 项目 25% / 技术 25%")
 
     def _load_learnings_context(self) -> str:
         """Build a context string from learnings history, using current persona's workspace."""
@@ -3328,16 +3489,17 @@ class ProductThinkingScanner:
         except Exception:
             return f"No learnings history yet for {self.effective_persona}."
 
-    def scan(self) -> list[ProductThinkingFinding]:
+    def scan(self) -> list[PerspectiveFinding]:
         """
-        One-shot holistic scan: like receiving a Feishu message asking
-        "这个项目还有什么可以优化的地方？"
-        
-        Gives LLM full context (README + code + learnings + hawk prefs) and
-        asks it to form a human-like opinion, not run a checklist.
+        Run all four perspective scanners and merge their findings.
+
+        Workflow:
+          1. Detect project type (via project-standard/project-types.md)
+          2. Scan from 4 perspectives (USER / PRODUCT / PROJECT / TECH)
+          3. Each perspective uses project-standard's reference docs as evaluation criteria
         """
-        all_findings: list[ProductThinkingFinding] = []
-        print(f"[ProductThinkingScanner] Starting scan of {len(self.repos)} repos...")
+        all_findings: list[PerspectiveFinding] = []
+        print(f"[FourPerspectiveScanner] Starting 4-perspective scan of {len(self.repos)} repos...")
         for repo in self.repos:
             if not repo.auto_monitor:
                 continue
@@ -3345,12 +3507,238 @@ class ProductThinkingScanner:
             if not repo_path.exists():
                 continue
 
-            print(f"\n  [Holistic] Thinking about {repo_path.name} like a human who received a Feishu message...")
-            findings = self._holistic_review(repo)
-            all_findings.extend(findings)
+            # Step 1: Detect project type using project-standard
+            project_type, weights = self._detect_project_type(repo_path)
+            print(f"\n  📋 Project type: {project_type} ({weights})")
+
+            print(f"\n  Scanning {repo_path.name} from 4 perspectives...")
+            for perspective in ["USER", "PRODUCT", "PROJECT", "TECH"]:
+                meta = PERSPECTIVE_META[perspective]
+                print(f"    [{perspective}] {meta['icon']} {meta['label']}...")
+                findings = self._scan_by_perspective(repo, perspective, project_type)
+                if findings:
+                    print(f"      → Found {len(findings)} finding(s)")
+                all_findings.extend(findings)
 
         all_findings.sort(key=lambda f: f.impact_score, reverse=True)
         return all_findings
+
+    def _scan_by_perspective(self, repo: Repository, perspective: str,
+                              project_type: str = "通用项目") -> list[PerspectiveFinding]:
+        """Dispatch to the right perspective scanner, passing project type."""
+        if perspective == "USER":
+            return self._scan_user(repo, project_type)
+        elif perspective == "PRODUCT":
+            return self._scan_product(repo, project_type)
+        elif perspective == "PROJECT":
+            return self._scan_project(repo, project_type)
+        elif perspective == "TECH":
+            return self._scan_tech(repo, project_type)
+        return []
+
+    def _scan_user(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+        """
+        👤 用户视角: Is it easy and pleasant to use?
+        Uses project-standard's user/user-perspective.md as evaluation criteria.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        repo_path = repo.resolve_path()
+        context = self._gather_context(repo)
+
+        # Load project-standard USER reference doc
+        ref_doc = self._project_standard_docs.get("USER", "")
+
+        prompt = (
+            f"你收到了这条飞书消息：\n"
+            f"\"你觉得 {repo_path.name} 这个工具好用吗？有什么用户体验不好的地方？\"\n\n"
+            f"【项目类型】{project_type}\n"
+            f"【你的身份】\n{self.effective_persona}\n"
+            f"【上下文】\n{self.master_summary[:600]}\n"
+            f"【用户偏好】\n"
+            f"  喜欢: {', '.join(self.hawk_prefs.get('liked', [])[:3]) or '(无)'}\n"
+            f"  不喜欢: {', '.join(self.hawk_prefs.get('disliked', [])[:3]) or '(无)'}\n\n"
+            f"【评判标准 - 用户视角】\n"
+            f"参考 project-standard 的标准进行评估：\n"
+            f"{ref_doc[:3000] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
+            f"从用户视角分析，关注：\n"
+            f"  1. CLI 设计是否直观（参数名、默认值、help文案）\n"
+            f"  2. 错误提示是否说人话\n"
+            f"  3. 新人上手门槛（文档够吗？）\n"
+            f"  4. 容错性（某一步失败了会怎样？）\n"
+            f"  5. 操作流程度（完成一件事要几步？）\n\n"
+            f"返回 JSON 数组，每个元素：\n"
+            f"  insight: (string, 中文) 你发现了什么用户体验问题\n"
+            f"  category: (string) cli_design | error_message | learning_curve | fault_tolerance | workflow\n"
+            f"  impact: (float 0.0-1.0) 对用户体验的影响程度\n"
+            f"  evidence: (array) 支持你观点的代码/文档片段（1-2条，每条<80字）\n"
+            f"  suggested_fix: (string, 中文) 具体改进建议\n"
+            f"  why_now: (string, 中文) 为什么现在重要\n"
+            f"  repo_path: (string) 相关文件或空字符串\n\n"
+            f"如果没有发现任何用户体验问题，返回空数组 []。\n"
+            f"Context:\n{context[:6000]}"
+        )
+        result = call_llm(prompt=prompt, system="你是一个资深用户体验专家。回复中文。",
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "USER")
+
+    def _scan_product(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+        """
+        📦 产品视角: Does it actually solve what it claims to solve?
+        Uses project-standard's product-requirements.md as evaluation criteria.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        repo_path = repo.resolve_path()
+        context = self._gather_context(repo)
+
+        # Load project-standard PRODUCT reference doc
+        ref_doc = self._project_standard_docs.get("PRODUCT", "")
+
+        prompt = (
+            f"你收到了这条飞书消息：\n"
+            f"\"你觉得 {repo_path.name} 还有什么可以优化的地方？有什么不足？\"\n\n"
+            f"【项目类型】{project_type}\n"
+            f"【你的身份】\n{self.effective_persona}\n"
+            f"【上下文】\n{self.master_summary[:600]}\n\n"
+            f"【评判标准 - 产品视角】\n"
+            f"参考 project-standard 的标准进行评估：\n"
+            f"{ref_doc[:3000] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
+            f"你要分析：这个项目声称解决什么问题？它真的解决了吗？\n\n"
+            f"关注：\n"
+            f"  1. README/SKILL.md 里 ❌ 标记的痛点，哪些还没解决？\n"
+            f"  2. 声称的功能，是完整实现还是半成品？\n"
+            f"  3. 文档和代码说的是同一件事吗？\n"
+            f"  4. 有什么应该有的功能却缺失了？\n\n"
+            f"返回 JSON 数组，每个元素：\n"
+            f"  insight: (string, 中文) 发现了什么产品级问题\n"
+            f"  category: (string) pain_point_unresolved | partial_solution | missing_feature | wrong_approach\n"
+            f"  pain_point: (string) 你参考的原始文档中记录的痛点\n"
+            f"  impact: (float 0.0-1.0) 对产品价值的影响\n"
+            f"  evidence: (array) 支持观点的文档/代码片段（1-2条）\n"
+            f"  suggested_fix: (string, 中文) 具体改进建议\n"
+            f"  why_now: (string, 中文) 为什么现在重要\n"
+            f"  repo_path: (string) 相关文件或空字符串\n\n"
+            f"如果没有发现任何产品级问题，返回空数组 []。\n"
+            f"Context:\n{context[:6000]}"
+        )
+        result = call_llm(prompt=prompt, system="你是一个严格的产品评审专家。回复中文。",
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "PRODUCT")
+
+    def _scan_project(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+        """
+        🏗 项目视角: Is the project运作得好？
+        Uses project-standard's project-inspection.md as evaluation criteria.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        repo_path = repo.resolve_path()
+        learnings = self.learnings
+        iterations_dir = repo_path / ".iterations"
+
+        # Load project-standard PROJECT reference doc
+        ref_doc = self._project_standard_docs.get("PROJECT", "")
+
+        # Check learnings history
+        learnings_status = "无" if "No learnings" in learnings else f"有 {learnings.count(chr(10))} 条记录"
+        iteration_count = len(list(iterations_dir.glob("*"))) if iterations_dir.exists() else 0
+
+        prompt = (
+            f"你收到了这条飞书消息：\n"
+            f"\"你觉得 {repo_path.name} 这个项目在运作方式上有什么问题？\"\n\n"
+            f"【项目类型】{project_type}\n"
+            f"【你的身份】\n{self.effective_persona}\n"
+            f"【上下文】\n{self.master_summary[:600]}\n"
+            f"【项目状态】\n"
+            f"  learnings历史: {learnings_status}\n"
+            f"  巡检迭代次数: {iteration_count}\n\n"
+            f"【评判标准 - 项目视角】\n"
+            f"参考 project-standard 的标准进行评估：\n"
+            f"{ref_doc[:3000] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
+            f"从项目运作视角分析，关注：\n"
+            f"  1. learnings有没有形成闭环（上一次发现的问题追踪了吗？）\n"
+            f"  2. 巡检是否有稳定的节奏（还是想起来才扫一次？）\n"
+            f"  3. 配置是否合理（有没有过度配置或缺失必要配置？）\n"
+            f"  4. 依赖管理是否健康（依赖是否过多、过旧？）\n\n"
+            f"返回 JSON 数组，每个元素：\n"
+            f"  insight: (string, 中文) 发现了什么项目运作问题\n"
+            f"  category: (string) learnings_gap | scan_rhythm | config_issue | dependency_issue\n"
+            f"  impact: (float 0.0-1.0) 对项目长期健康的影响\n"
+            f"  evidence: (array) 支持观点的证据（1-2条）\n"
+            f"  suggested_fix: (string, 中文) 具体改进建议\n"
+            f"  why_now: (string, 中文) 为什么现在重要\n"
+            f"  repo_path: (string) 相关文件或空字符串\n\n"
+            f"如果没有发现任何项目运作问题，返回空数组 []。\n"
+            f"Learnings历史:\n{learnings[:1000]}"
+        )
+        result = call_llm(prompt=prompt, system="你是一个项目管理和工程效率专家。回复中文。",
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "PROJECT")
+
+    def _parse_llm_findings(self, raw_result: str, perspective: str) -> list[PerspectiveFinding]:
+        """Parse raw LLM output into a list of PerspectiveFinding."""
+        if not raw_result:
+            return []
+        try:
+            parsed = json.loads(raw_result)
+        except json.JSONDecodeError:
+            m = re.search(r'\[[\s\S]*\]', raw_result)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except Exception:
+                    return []
+            else:
+                return []
+        if not isinstance(parsed, list):
+            return []
+        findings: list[PerspectiveFinding] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            insight = item.get("insight", "").strip()
+            if not insight:
+                continue
+            findings.append(PerspectiveFinding(
+                description=insight,
+                perspective=perspective,
+                category=item.get("category", "unknown"),
+                evidence=[str(e)[:80] for e in item.get("evidence", [])[:2]],
+                impact_score=float(item.get("impact", 0.5)),
+                suggested_direction=str(item.get("suggested_fix", item.get("suggested_direction", "")))[:150],
+                file_path=str(item.get("repo_path", "")),
+                risk=RiskLevel.MEDIUM,
+                why_now=str(item.get("why_now", ""))[:80],
+            ))
+        return findings
+
+    def _scan_tech(self, repo: Repository, project_type: str = "通用项目") -> list[PerspectiveFinding]:
+        """
+        ⚙️ 技术视角: Is the code healthy?
+        Uses project-standard's code-standards.md as evaluation criteria.
+        Delegates to the existing optimization scanner for code-level findings.
+        """
+        findings = scan_optimizations(repo)
+        # Convert OptimizationFinding → PerspectiveFinding(TECH)
+        risk_to_impact = {"low": 0.3, "medium": 0.5, "high": 0.7}
+        result: list[PerspectiveFinding] = []
+        for f in findings:
+            result.append(PerspectiveFinding(
+                description=f.description,
+                perspective="TECH",
+                category=f.type,
+                evidence=[f"{f.file_path}:{f.line}" if f.file_path else ""],
+                impact_score=risk_to_impact.get(f.risk.value, 0.5),
+                suggested_direction="优化代码质量",
+                file_path=f.file_path or "",
+                risk=f.risk,
+                why_now="技术债务积累",
+            ))
+        return result
 
     def _gather_context(self, repo: Repository) -> str:
         """Gather all available context for holistic analysis."""
@@ -3399,7 +3787,7 @@ class ProductThinkingScanner:
 
         return "\n".join(parts)
 
-    def _holistic_review(self, repo: Repository) -> list[ProductThinkingFinding]:
+    def _holistic_review(self, repo: Repository) -> list[PerspectiveFinding]:
         """
         Single LLM call that mirrors how a human would think when asked:
         'What can be improved in this project?'
@@ -3488,14 +3876,14 @@ class ProductThinkingScanner:
             print(f"  [Holistic] LLM returned non-array: {type(parsed)}")
             return []
 
-        findings: list[ProductThinkingFinding] = []
+        findings: list[PerspectiveFinding] = []
         for item in parsed:
             if not isinstance(item, dict):
                 continue
             insight = item.get("insight", "").strip()
             if not insight:
                 continue
-            finding = ProductThinkingFinding(
+            finding = PerspectiveFinding(
                 description=insight,
                 category=item.get("category", "product_gap"),
                 evidence=item.get("evidence", [])[:3],
@@ -3510,12 +3898,12 @@ class ProductThinkingScanner:
         print(f"  [Holistic] Found {len(findings)} human-level insights")
         return findings
 
-    def _scan_product_docs(self, repo: Repository) -> list[ProductThinkingFinding]:
+    def _scan_product_docs(self, repo: Repository) -> list[PerspectiveFinding]:
         """
         Phase 1: Read README.md, README.zh-CN.md, SKILL.md and extract documented
         pain points. Ask LLM which of these pain points are still unresolved.
         """
-        findings: list[ProductThinkingFinding] = []
+        findings: list[PerspectiveFinding] = []
         repo_path = repo.resolve_path()
 
         doc_files = []
@@ -3679,12 +4067,12 @@ class ProductThinkingScanner:
 
         return output
 
-    def _scan_code_files(self, repo: Repository) -> list[ProductThinkingFinding]:
+    def _scan_code_files(self, repo: Repository) -> list[PerspectiveFinding]:
         """
         Phase 2: Scan code files for implementation quality.
         NOTE: README/SKILL.md/SOUL.md/AGENTS.md are handled by _scan_product_docs.
         """
-        findings: list[ProductThinkingFinding] = []
+        findings: list[PerspectiveFinding] = []
         repo_path = repo.resolve_path()
 
         # Only code files — docs handled by _scan_product_docs
@@ -3837,15 +4225,16 @@ class ProductThinkingScanner:
 
         return output
 
-    def _parse_finding(self, parsed: dict, file_path: str) -> Optional[ProductThinkingFinding]:
-        """Parse a cached or LLM-parsed dict into a ProductThinkingFinding."""
+    def _parse_finding(self, parsed: dict, file_path: str, perspective: str = "PRODUCT") -> Optional[PerspectiveFinding]:
+        """Parse a cached or LLM-parsed dict into a PerspectiveFinding."""
         insight = parsed.get("insight", "").strip()
         category = parsed.get("category", "")
         impact = float(parsed.get("impact", 0.0))
         if not insight or category == "ok" or impact == 0.0:
             return None
-        return ProductThinkingFinding(
+        return PerspectiveFinding(
             description=insight,
+            perspective=perspective,
             category=category,
             evidence=parsed.get("evidence", []),
             impact_score=impact,
@@ -3855,8 +4244,8 @@ class ProductThinkingScanner:
             risk=RiskLevel.MEDIUM,
         )
 
-    def _analyze_learnings_patterns(self, repo: Repository) -> list[ProductThinkingFinding]:
-        findings: list[ProductThinkingFinding] = []
+    def _analyze_learnings_patterns(self, repo: Repository) -> list[PerspectiveFinding]:
+        findings: list[PerspectiveFinding] = []
         learnings = load_learnings()
         rejections = learnings.get("rejections", [])
         approvals = learnings.get("approvals", [])
@@ -3871,7 +4260,7 @@ class ProductThinkingScanner:
             type_count[desc] = type_count.get(desc, 0) + 1
         for reason, count in reason_count.items():
             if count >= 3:
-                findings.append(ProductThinkingFinding(
+                findings.append(PerspectiveFinding(
                     description=(
                         f"STOP: This keeps getting rejected ({count}x) — '{reason}'. "
                         "Auto-evolve keeps trying the same thing. Rules need adjustment."
@@ -3886,7 +4275,7 @@ class ProductThinkingScanner:
                 ))
         for desc, count in type_count.items():
             if count >= 3:
-                findings.append(ProductThinkingFinding(
+                findings.append(PerspectiveFinding(
                     description=(
                         f"Stop attempting this: '{desc}' — rejected {count} times. "
                         "The system keeps generating changes nobody wants."
@@ -3905,7 +4294,7 @@ class ProductThinkingScanner:
             approval_themes[theme] = approval_themes.get(theme, 0) + 1
         for theme, count in approval_themes.items():
             if count >= 5:
-                findings.append(ProductThinkingFinding(
+                findings.append(PerspectiveFinding(
                     description=(
                         f"This type of change keeps getting approved ({count}x): '{theme}'. "
                         "Consider doing MORE of this automatically."
@@ -3921,35 +4310,77 @@ class ProductThinkingScanner:
         return findings
 
 
-def print_product_findings(findings: list[ProductThinkingFinding]) -> None:
+def print_product_findings(findings: list[PerspectiveFinding]) -> None:
+    """Display findings grouped by perspective with icons and impact bars."""
     if not findings:
         print(f"\n🎯 Product Evolution Insights: none (all clear — or LLM returned empty)")
         return
-    print(f"\n🎯 Product Evolution Insights (from {len(findings)} finding(s)):")
-    print("=" * 60)
-    icons = {
-        "user_complaint": "😤",
-        "friction_point": "🛑",
-        "unused_feature": "💤",
-        "competitive_gap": "📊",
-        "stop_doing": "🚫",
-        "add_feature": "✨",
+
+    # Group by perspective
+    by_perspective: dict[str, list[PerspectiveFinding]] = {}
+    for f in findings:
+        by_perspective.setdefault(f.perspective, []).append(f)
+
+    print(f"\n🎯 Four-Perspective Insights ({len(findings)} total):")
+    print("=" * 62)
+
+    # Icons per category
+    category_icons = {
+        # USER
+        "cli_design": "🎨",
+        "error_message": "📛",
+        "learning_curve": "📉",
+        "fault_tolerance": "🛡",
+        "workflow": "🔗",
+        # PRODUCT
+        "pain_point_unresolved": "🚨",
+        "partial_solution": "⚠️",
+        "missing_feature": "❌",
+        "wrong_approach": "🔄",
+        # PROJECT
+        "learnings_gap": "🔁",
+        "scan_rhythm": "⏰",
+        "config_issue": "⚙️",
+        "dependency_issue": "📦",
+        # TECH
+        "duplicate_code": "📋",
+        "long_function": "📏",
+        "missing_test": "🧪",
+        "dead_code": "💀",
     }
-    for i, f in enumerate(findings[:10], 1):
-        icon = icons.get(f.category, "❓")
-        impact_bar = "█" * int(f.impact_score * 10) + "░" * (10 - int(f.impact_score * 10))
-        print(f"\n  {i}. {icon} [{f.category.replace('_', ' ').upper()}]")
-        print(f"     {f.description}")
-        if f.evidence:
-            print(f"     Evidence: {' | '.join(str(e)[:60] for e in f.evidence[:2])}")
-        print(f"     Impact: {impact_bar} {f.impact_score:.1f}")
-        if f.suggested_direction:
-            print(f"     → {f.suggested_direction}")
-        if f.why_now:
-            print(f"     ⏱ {f.why_now}")
-        print(f"     File: {f.file_path}")
-    if len(findings) > 10:
-        print(f"\n  ... and {len(findings) - 10} more insights")
+
+    # Display order: USER > PRODUCT > PROJECT > TECH
+    for perspective in ["USER", "PRODUCT", "PROJECT", "TECH"]:
+        items = by_perspective.get(perspective, [])
+        if not items:
+            continue
+        meta = PERSPECTIVE_META[perspective]
+        stars = "⭐" * meta["stars"]
+        print(f"\n{'━' * 62}")
+        print(f"{meta['icon']} {meta['label']} {stars}")
+        print(f"{'━' * 62}")
+
+        for i, f in enumerate(items[:10], 1):
+            icon = category_icons.get(f.category, "❓")
+            impact_bar = "█" * int(f.impact_score * 10) + "░" * (10 - int(f.impact_score * 10))
+            risk_label = f.risk.value.upper()
+            print(f"\n  {i}. {icon} {risk_label} [{f.category}]")
+            print(f"     {f.description}")
+            if f.evidence:
+                print(f"     Evidence: {' | '.join(str(e)[:60] for e in f.evidence[:2])}")
+            print(f"     Impact: {impact_bar} {f.impact_score:.1f}")
+            if f.suggested_direction:
+                print(f"     → {f.suggested_direction}")
+            if f.why_now:
+                print(f"     ⏱ {f.why_now}")
+            if f.file_path:
+                print(f"     📄 {f.file_path}")
+
+        if len(items) > 10:
+            print(f"\n  ... and {len(items) - 10} more in {meta['label']}")
+
+    print(f"\n{'=' * 62}")
+    print(f"📌 行动优先级：用户 > 产品 > 项目 > 技术")
 
 
 # ===========================================================
@@ -4581,7 +5012,7 @@ def cmd_scan(args) -> int:
             return 1
         print(f"🎯 Targeting single repo: {target}")
 
-    print("🔍 Auto-Evolve v3.5 Scanner")
+    print("🔍 Auto-Evolve v3.9 Scanner")
     print(f"   Mode: {mode.value}")
     print("=" * 50)
 
@@ -4609,7 +5040,7 @@ def cmd_scan(args) -> int:
 
     # v3.3: Product Thinking Scanner — ask the RIGHT questions
     print("\n" + "=" * 50)
-    product_scanner = ProductThinkingScanner(
+    product_scanner = FourPerspectiveScanner(
         repos, config,
         recall_persona=getattr(args, 'recall_persona', '') or '',
         memory_source=getattr(args, 'memory_source', 'auto') or 'auto',
