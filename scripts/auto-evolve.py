@@ -1305,10 +1305,14 @@ def _call_llm_for_refactor(
     prompt: str,
     system: str,
     file_ext: str,
+    max_retries: int = 2,
 ) -> str:
     """
     Call LLM to generate code refactor. Returns the refactored code string.
     Falls back to empty string on failure.
+    
+    Retries on prose/empty responses with a stricter system prompt to improve
+    reliability of code generation.
     """
     config = get_openclaw_llm_config()
     if not config.get("api_key") or not config.get("base_url"):
@@ -1332,7 +1336,6 @@ def _call_llm_for_refactor(
     # Detect API type from base_url
     base_url = config["base_url"].rstrip("/")
     if "anthropic" in base_url or config.get("model", "").lower().startswith("minimax"):
-        # Anthropic messages API
         body = {
             "model": config.get("model", "MiniMax-M2"),
             "messages": messages,
@@ -1341,7 +1344,6 @@ def _call_llm_for_refactor(
         }
         endpoint = base_url + "/v1/messages"
     else:
-        # OpenAI chat completions API
         body = {
             "model": config.get("model", "MiniMax-M2"),
             "messages": messages,
@@ -1350,73 +1352,109 @@ def _call_llm_for_refactor(
         }
         endpoint = base_url + "/chat/completions"
 
-    try:
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(body).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            # Parse response based on API type
-            if "anthropic" in endpoint:
-                # Anthropic/MiniMax response format: may contain 'thinking' and 'text' blocks
-                # Prefer text blocks, but fall back to thinking blocks if no text
-                text_blocks = [
-                    b.get("text", "") for b in data.get("content", [])
-                    if b.get("type") == "text" and b.get("text", "").strip()
-                ]
-                if text_blocks:
-                    content = max(text_blocks, key=len)
-                else:
-                    # Fall back to thinking blocks — extract the thinking content
-                    thinking_blocks = [
-                        b.get("thinking", "") for b in data.get("content", [])
-                        if b.get("type") == "thinking" and b.get("thinking", "").strip()
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "anthropic" in endpoint:
+                    text_blocks = [
+                        b.get("text", "") for b in data.get("content", [])
+                        if b.get("type") == "text" and b.get("text", "").strip()
                     ]
-                    content = "\n".join(thinking_blocks)
-            else:
-                # OpenAI response format
-                content = (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                )
-            # Strip markdown code fences if present
-            return _strip_code_fences(content)
-    except urllib.error.HTTPError as e:
-        return ""
-    except Exception:
-        return ""
+                    if text_blocks:
+                        content_text = max(text_blocks, key=len)
+                    else:
+                        thinking_blocks = [
+                            b.get("thinking", "") for b in data.get("content", [])
+                            if b.get("type") == "thinking" and b.get("thinking", "").strip()
+                        ]
+                        content_text = "\n".join(thinking_blocks)
+                else:
+                    content_text = (
+                        data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                stripped = _strip_code_fences(content_text)
+                if stripped:
+                    return stripped
+                # Retry with stricter system prompt
+                if attempt == 0:
+                    strict_system = (
+                        (system + "\n\n" if system else "")
+                        + "CRITICAL: You must output ONLY code. "
+                        "Start directly with 'def ' or 'class ' or equivalent. "
+                        "Do not write any explanation, introduction, or description."
+                    )
+                    messages = (
+                        [{"role": "system", "content": strict_system}]
+                        if strict_system else []
+                    ) + [{"role": "user", "content": prompt}]
+                    body["messages"] = messages
+            if attempt == max_retries - 1:
+                return ""
+        except urllib.error.HTTPError:
+            if attempt == max_retries - 1:
+                return ""
+        except Exception:
+            if attempt == max_retries - 1:
+                return ""
+    return ""
 
 
 def _strip_code_fences(text: str) -> str:
-    """Strip leading/trailing markdown code fences from LLM output."""
+    """
+    Strip markdown code fences and prose from LLM output.
+    
+    Handles cases where LLM returns prose like "Here's the refactored code:"
+    instead of actual code. Uses statistical detection (code-like line ratio)
+    and pattern matching to reliably extract code.
+    """
+    if not text:
+        return ""
+    
     lines = text.strip().split("\n")
-    # Remove triple-backtick fences
-    if lines and lines[0].strip().startswith("```"):
+    
+    # Remove leading/trailing fence lines
+    while lines and "```" in lines[0]:
         lines = lines[1:]
-    if lines and lines[-1].strip().startswith("```"):
+    while lines and "```" in lines[-1]:
         lines = lines[:-1]
+    
     content = "\n".join(lines).strip()
-
-    # If content starts with natural language (not code), try to find a code block
-    # This handles cases where LLM returns "Here's the refactored code:" followed by code
-    non_code_starters = (
-        "here", "this", "the", "i", "to", "after", "first", "you",
-        "note", "let", "we", "of", "in", "for", "with", "that",
-        "note:", "here's", "this ", "the function", "the code",
+    if not content:
+        return ""
+    
+    # Count code-like vs prose lines
+    code_indicators = [
+        "def ", "class ", "import ", "from ", "if ", "else:",
+        "return ", "for ", "while ", "async ", "@",
+        "const ", "let ", "function ", "fn ", "func ",
+        "package ", "export ", "module ",
+    ]
+    
+    non_empty_lines = [l for l in lines if l.strip()]
+    prose_lines = sum(
+        1 for l in non_empty_lines
+        if not any(l.strip().startswith(ind) for ind in code_indicators)
     )
-    first_word = content.split()[0].lower() if content.split() else ""
-    if first_word in non_code_starters or not first_word:
-        # Try to find a code block pattern: lines that start with valid Python keywords
-        code_indicators = ("def ", "class ", "import ", "from ", "if ", "else:", "return ", "for ", "while ", "async ", "@", "async def")
-        for i, line in enumerate(lines):
+    total = len(non_empty_lines)
+    
+    # If less than 30% of non-empty lines are code-like, it's likely prose
+    if total > 5 and (total - prose_lines) / total < 0.3:
+        # Try to find the first code-block starting line
+        for i, line in enumerate(non_empty_lines):
             stripped = line.strip()
             if any(stripped.startswith(ind) for ind in code_indicators):
-                return "\n".join(lines[i:]).strip()
-
+                return "\n".join(non_empty_lines[i:]).strip()
+        return ""  # No real code found
+    
     return content
 
 
@@ -1476,25 +1514,29 @@ def _execute_duplicate_code(
     desc = item.get("description", "")
 
     system = (
-        f"You are a code refactoring assistant. You work with {lang} only.\n"
+        f"You are an expert code refactorer. You work with {lang} only.\n"
+        "CRITICAL: Return ONLY the refactored code. "
+        "Do NOT write any explanation, comment, or description before or after the code. "
+        "Start directly with the code (no 'here is', 'here's', 'this is', 'i would', etc.). "
+        "If you cannot refactor, write 'EMPTY' and nothing else.\n"
         "Task: eliminate duplicate code by extracting repeated patterns into constants or helpers.\n"
         "Rules:\n"
         "1. Find the duplicate pattern described.\n"
         "2. Replace repeated occurrences with a constant or small helper function.\n"
         "3. Preserve all functionality exactly.\n"
-        "4. Return ONLY the complete modified file content. No markdown fences.\n"
-        "5. If the duplication is incidental (not worth extracting), still clean it minimally.\n"
+        "4. Return ONLY the complete modified file content. No markdown fences, no explanation.\n"
     )
     prompt = (
+        f"Language: {lang}\n"
         f"File: {item['file_path']}\n"
-        f"Finding: {desc}\n\n"
-        f"Current code:\n```{lang}\n{code}\n```\n\n"
-        "Refactor to eliminate duplication. Return complete file."
+        f"Duplicate pattern: {desc}\n\n"
+        f"Original code:\n```{lang}\n{code}\n```\n\n"
+        "Refactored code (ONLY code, NO explanation):"
     )
 
     new_code = _call_llm_for_refactor(prompt, system, file_ext)
     if not new_code:
-        return "", "LLM call failed or no API key"
+        return "", "LLM call failed or no valid code returned"
     return new_code, "duplicate pattern refactored"
 
 
@@ -1765,12 +1807,14 @@ def _auto_execute_optimizations(
         if not new_code:
             print(f"  ⏭️  [{change_item.id}] {file_path}: {result_msg or 'no LLM output'}")
             stats["skipped_llm"] += 1
+            record_learning(finding_dict, result_msg or "skipped_llm: no valid code returned", str(repo_path))
             continue
 
         # Skip if no actual change was made
         if new_code.strip() == code.strip():
             print(f"  ⏭️  [{change_item.id}] {file_path}: no change produced")
             stats["skipped_llm"] += 1
+            record_learning(finding_dict, "skipped_llm: no change produced", str(repo_path))
             continue
 
         # Quality gate: py_compile check
@@ -1779,6 +1823,7 @@ def _auto_execute_optimizations(
             print(f"  ❌ [{change_item.id}] {file_path}: quality gate failed — {quality_err[:80]}")
             stats["quality_failed"] += 1
             stats["failed"] += 1
+            record_learning(finding_dict, f"quality_failed: {quality_err[:100]}", str(repo_path))
             continue
 
         # Write the optimized code back
@@ -1790,6 +1835,7 @@ def _auto_execute_optimizations(
             if before_hash:
                 _rollback_optimization(repo, file_path, before_hash)
             stats["failed"] += 1
+            record_learning(finding_dict, f"write_failed: {e}", str(repo_path))
             continue
 
         # Git commit (truncate message safely to avoid UTF-8 cutting)
@@ -1803,6 +1849,7 @@ def _auto_execute_optimizations(
             if before_hash:
                 _rollback_optimization(repo, file_path, before_hash)
             stats["failed"] += 1
+            record_learning(finding_dict, f"commit_failed: {e}", str(repo_path))
             continue
 
         # Success
@@ -1810,6 +1857,7 @@ def _auto_execute_optimizations(
         executed.append(change_item)
         stats["succeeded"] += 1
         print(f"  ✅ [{change_item.id}] {opt_type} {file_path} ({commit_hash[:7]})")
+        record_learning(finding_dict, "ok", str(repo_path))
 
     # Summary
     print(
@@ -2228,39 +2276,35 @@ def should_auto_execute(rules: dict, risk: RiskLevel) -> bool:
 # Learning History
 # ===========================================================
 
-def ensure_learnings_dir() -> Path:
-    LEARNINGS_DIR.mkdir(parents=True, exist_ok=True)
-    return LEARNINGS_DIR
+def load_learnings(persona: str = "") -> dict:
+    """Load learnings using per-persona path (delegates to helpers)."""
+    if not persona:
+        persona = detect_persona()
+    p_dir = get_workspace_for_persona(persona) / ".learnings"
+    approvals, rejections = [], []
+    try:
+        with open(p_dir / "approvals.json") as f:
+            approvals = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    try:
+        with open(p_dir / "rejections.json") as f:
+            rejections = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {"approvals": approvals, "rejections": rejections}
 
 
-def load_learnings() -> dict:
-    ensure_learnings_dir()
-    rejections_file = LEARNINGS_DIR / "rejections.json"
-    approvals_file = LEARNINGS_DIR / "approvals.json"
-
-    data: dict = {"rejections": [], "approvals": []}
-
-    if rejections_file.exists():
-        try:
-            data["rejections"] = json.loads(rejections_file.read_text()).get("rejections", [])
-        except (json.JSONDecodeError, OSError):
-            data["rejections"] = []
-
-    if approvals_file.exists():
-        try:
-            data["approvals"] = json.loads(approvals_file.read_text()).get("approvals", [])
-        except (json.JSONDecodeError, OSError):
-            data["approvals"] = []
-
-    return data
-
-
-def save_learnings(data: dict) -> None:
-    ensure_learnings_dir()
-    rejections_file = LEARNINGS_DIR / "rejections.json"
-    approvals_file = LEARNINGS_DIR / "approvals.json"
-    rejections_file.write_text(json.dumps({"rejections": data.get("rejections", [])}, indent=2))
-    approvals_file.write_text(json.dumps({"approvals": data.get("approvals", [])}, indent=2))
+def save_learnings(data: dict, persona: str = "") -> None:
+    """Save learnings using per-persona path."""
+    if not persona:
+        persona = detect_persona()
+    p_dir = get_workspace_for_persona(persona) / ".learnings"
+    p_dir.mkdir(parents=True, exist_ok=True)
+    with open(p_dir / "rejections.json", "w") as f:
+        json.dump({"rejections": data.get("rejections", [])}, f, indent=2)
+    with open(p_dir / "approvals.json", "w") as f:
+        json.dump({"approvals": data.get("approvals", [])}, f, indent=2)
 
 
 def add_learning(
@@ -3653,6 +3697,12 @@ def _auto_execute_changes(
                         todos_resolved += 1
                     log_desc = sanitize_change_for_log(change, repo_obj)
                     print(f"  ✅ {log_desc} ({commit_hash})")
+                    change_dict = {
+                        "description": change.description,
+                        "type": change.optimization_type or change.category.value,
+                        "file_path": change.file_path,
+                    }
+                    record_learning(change_dict, "ok", change.repo_path)
                 except Exception as e:
                     print(f"  ❌ {change.file_path}: {e}")
         remaining_pending = pending_sorted
@@ -4055,6 +4105,20 @@ def cmd_scan(args) -> int:
         quality_gate_passed=quality_passed,
     )
     save_metrics(metrics)
+    
+    # Record metrics to per-persona learnings (for trend tracking)
+    try:
+        from scripts.helpers import record_iteration_metrics
+        record_iteration_metrics(
+            iteration_id=iteration_id,
+            todo_count=todos_resolved + len(pending_items),  # approximate
+            todo_resolved=todos_resolved,
+            auto_executed=total_auto,
+            llm_cost_usd=cost_summary.get("total_cost_usd", 0.0),
+        )
+    except Exception:
+        pass  # Non-critical
+    
     contributors = _track_contributors(repos_affected)
 
     # Build manifest and save
@@ -5026,6 +5090,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # Fix sys.path so we can import from scripts.helpers
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from scripts.helpers import record_learning, record_iteration_metrics
+    
     parser = _build_argument_parser()
     args = parser.parse_args()
 

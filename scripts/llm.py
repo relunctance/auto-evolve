@@ -103,51 +103,82 @@ def call_llm(prompt: str, system: str = "", model: str = "",
 
 
 def _strip_code_fences(text: str) -> str:
-    """Strip markdown code fences from LLM output."""
+    """
+    Strip markdown code fences and prose from LLM output.
+    
+    Handles cases where LLM returns prose instead of code. Uses statistical
+    detection (code-like line ratio) and pattern matching.
+    """
     if not text:
         return ""
-    lines = text.splitlines()
-    # Remove common fence patterns
-    while lines and ("```" in lines[0] or lines[0].strip().startswith("here's") or
-                    lines[0].strip().startswith("here is")):
+    lines = text.strip().split("\n")
+    # Remove leading/trailing fence lines
+    while lines and "```" in lines[0]:
         lines = lines[1:]
-    while lines and ("```" in lines[-1] or lines[-1].strip().startswith("note:") or
-                    lines[-1].strip().startswith("let me know")):
+    while lines and "```" in lines[-1]:
         lines = lines[:-1]
     content = "\n".join(lines).strip()
     if not content:
         return ""
-    # If content starts with natural language (not code), try to find a code block
-    non_code_starters = (
-        "here", "this", "the", "i", "to", "after", "first", "you",
-        "note", "let", "we", "of", "in", "for", "with", "that",
-        "note:", "here's", "this ", "the function", "the code",
-        "looking", "analysis", "based", "the following", "to fix",
-        "the issue", "the problem", "i can", "i would",
+    # Count code-like vs prose lines
+    code_indicators = [
+        "def ", "class ", "import ", "from ", "if ", "else:",
+        "return ", "for ", "while ", "async ", "@",
+        "const ", "let ", "function ", "fn ", "func ",
+        "package ", "export ", "module ",
+    ]
+    non_empty_lines = [l for l in lines if l.strip()]
+    prose_lines = sum(
+        1 for l in non_empty_lines
+        if not any(l.strip().startswith(ind) for ind in code_indicators)
     )
-    first_word = content.split()[0].lower() if content.split() else ""
-    first_two_words = " ".join(content.lower().split()[:2]) if content.split() else ""
-    prose_patterns = (
-        "looking at", "based on the", "i can see", "the following",
-        "here is", "here's the", "to fix this", "the issue is",
-    )
-    is_prose = (
-        first_word in non_code_starters
-        or any(first_two_words.startswith(p) for p in prose_patterns)
-        or not first_word
-    )
-    if is_prose:
-        code_indicators = (
-            "def ", "class ", "import ", "from ", "if ", "else:", "return ",
-            "for ", "while ", "async ", "@", "async def", "const ", "let ",
-            "function ", "fn ", "func "
-        )
-        for i, line in enumerate(lines):
+    total = len(non_empty_lines)
+    # If less than 30% of non-empty lines are code-like, it's likely prose
+    if total > 5 and (total - prose_lines) / total < 0.3:
+        for i, line in enumerate(non_empty_lines):
             stripped = line.strip()
             if any(stripped.startswith(ind) for ind in code_indicators):
-                return "\n".join(lines[i:]).strip()
-        return ""
+                return "\n".join(non_empty_lines[i:]).strip()
+        return ""  # No real code found
     return content
+
+
+def call_llm_with_retry(
+    prompt: str,
+    system: str = "",
+    model: str = "",
+    base_url: str = "",
+    api_key: str = "",
+    temperature: float = 0.3,
+    max_retries: int = 2,
+) -> str:
+    """
+    Call LLM with retry on prose/empty response.
+    
+    Retries once with a stricter system prompt if the first response
+    appears to be prose rather than code.
+    """
+    for attempt in range(max_retries):
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            temperature=temperature,
+        )
+        if result.strip() and result.strip() != "EMPTY":
+            return result
+        if attempt == 0:
+            # Retry with stricter system prompt
+            strict_system = (
+                (system + "\n\n" if system else "")
+                + "CRITICAL: You must output ONLY code. "
+                "Start with 'def ' or 'class ' or equivalent. "
+                "Do not write any explanation or description."
+            )
+            system = strict_system
+    return ""
 
 
 def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> dict:

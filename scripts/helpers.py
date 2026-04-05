@@ -9,7 +9,35 @@ from .core import *
 # ---- Learnings -----------------------------------------------------------
 
 # Per-persona learnings directory (not inside skill folder)
-LEARNINGS_DIR = Path.home() / ".openclaw" / "workspace" / ".learnings"
+_LEARNINGS_DIR_DEFAULT = Path.home() / ".openclaw" / "workspace" / ".learnings"
+
+
+def _detect_persona() -> str:
+    """Detect current agent persona from OPENCLAW_AGENT_ID env var or cwd."""
+    import os
+    persona = os.environ.get("OPENCLAW_AGENT_ID", "").strip().lower()
+    if persona in ("main", "tseng", "wukong", "bajie", "bailong", "shaseng"):
+        return persona
+    cwd = os.getcwd()
+    for p in ("workspace-tseng", "workspace-wukong", "workspace-bajie",
+              "workspace-bailong", "workspace-shaseng"):
+        if p in cwd:
+            return p.replace("workspace-", "")
+    return "main"
+
+
+def _workspace_for_persona(persona: str) -> Path:
+    """Return workspace path for a given persona."""
+    home = Path.home()
+    if persona == "main":
+        return home / ".openclaw" / "workspace"
+    return home / ".openclaw" / f"workspace-{persona}"
+
+
+def get_learnings_dir(persona: str = "") -> Path:
+    """Return per-persona .learnings directory (auto-created)."""
+    p = persona or _detect_persona()
+    return _workspace_for_persona(p) / ".learnings"
 
 
 def ensure_learnings_dir(persona: str = "") -> Path:
@@ -71,16 +99,17 @@ def record_learning(
         "repo": repo,
     }
     
-    ensure_learnings_dir()
+    persona = _detect_persona()
+    d = ensure_learnings_dir(persona)
     
     approvals, rejections = [], []
     try:
-        with open(LEARNINGS_DIR / "approvals.json") as f:
+        with open(d / "approvals.json") as f:
             approvals = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     try:
-        with open(LEARNINGS_DIR / "rejections.json") as f:
+        with open(d / "rejections.json") as f:
             rejections = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -91,9 +120,9 @@ def record_learning(
         learning["reason"] = result
         rejections.append(learning)
     
-    with open(LEARNINGS_DIR / "approvals.json", "w") as f:
+    with open(d / "approvals.json", "w") as f:
         json.dump(approvals, f, ensure_ascii=False, indent=2)
-    with open(LEARNINGS_DIR / "rejections.json", "w") as f:
+    with open(d / "rejections.json", "w") as f:
         json.dump(rejections, f, ensure_ascii=False, indent=2)
 
 
@@ -128,7 +157,7 @@ def record_iteration_metrics(
         "llm_cost_usd": llm_cost_usd,
     }
     
-    metrics_dir = LEARNINGS_DIR / "metrics"
+    metrics_dir = get_learnings_dir(_detect_persona()) / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     
     with open(metrics_dir / f"{iteration_id}.json", "w") as f:
