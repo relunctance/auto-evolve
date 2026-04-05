@@ -2,6 +2,61 @@
 
 All notable changes to auto-evolve are documented here.
 
+## [2.1.0] — 2026-04-05
+
+### New Features
+
+- **Two operation modes:**
+  - `semi-auto` (default): auto changes held until `confirm`, rejections tracked
+  - `full-auto`: execute per rules without waiting
+  - `set-mode` and `set-rules` commands to configure
+
+- **`confirm` command:** Execute held changes in semi-auto mode after reviewing
+
+- **`reject` command:** Reject a pending item with reason, recorded in learnings
+
+- **`learnings` command:** View rejection and approval history
+
+- **`schedule` command:** Output OpenClaw cron setup commands (no direct cron management)
+
+- **`set-mode` and `set-rules` commands:** CLI for mode and rule configuration
+
+- **Learning history (`.learnings/`):**
+  - `rejections.json` — rejected changes with reasons
+  - `approvals.json` — approved changes
+  - Rejected changes are skipped in future scans
+
+- **Closed-repo privacy sanitization:**
+  - `pending-review.json` redacts file paths and content for closed repos
+  - Uses content hashes instead of file paths
+  - Logs don't contain sensitive change details
+
+- **Execution preview:** Shows what will be executed before applying (both modes)
+
+- **Alert generation:** `alert.json` created in iteration dir when quality gates fail
+
+- **`has_alert` flag** in catalog and manifest for iterations with quality gate failures
+
+### Changed
+
+- **Config format updated:** `mode`, `full_auto_rules`, `semi_auto_rules` keys added
+- **Semi-auto behavior:** low-risk auto changes are now **held** (not auto-committed) until `confirm`
+- **Iteration status values:** `full-auto-completed` added for full-auto scans
+- **Repo list display:** Shows 🔒 for closed repos
+
+### Internal
+
+- `AlertEntry` dataclass for structured alerts
+- `LearningEntry` dataclass for learning records
+- `OperationMode` enum
+- `sanitize_pending_item()` for closed-repo content redaction
+- `sanitize_change_for_log()` for closed-repo log sanitization
+- `is_rejected()` checks learning history before recommending changes
+- `add_learning()` records approvals and rejections
+- Full type annotations throughout
+
+---
+
 ## [2.0.0] — 2026-04-05
 
 ### Breaking Changes

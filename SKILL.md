@@ -1,4 +1,4 @@
-# Auto-Evolve v2
+# Auto-Evolve v2.1
 
 **Automated skill iteration manager with full audit trail.**
 
@@ -8,14 +8,45 @@
 
 ## Overview
 
-Auto-Evolve v2 is a complete rewrite with multi-repository support, branch+PR workflows for high-risk changes, and proactive optimization discovery.
+Auto-Evolve v2.1 is a complete rewrite with multi-repository support, branch+PR workflows for high-risk changes, proactive optimization discovery, and two operation modes (semi-auto and full-auto).
 
 ```
-Scheduled Scan → Risk Classification → Auto-Execute (low) → Push
-                                           ↓
-                    Branch+PR (high) / Pending Review (medium)
-                                           ↓
-                              User approves via CLI
+Scheduled Scan → Risk Classification → Learning Check → Mode Decision
+                                                            │
+                    ┌──────────────┴──────────────┐
+                 Semi-Auto                      Full-Auto
+                 (default)                       (per rules)
+                    │                               │
+              confirm to exec              execute_low_risk: true
+              pending review               execute_medium_risk: false
+              learnings track               execute_high_risk: false
+```
+
+---
+
+## Operation Modes
+
+### Semi-Auto (Default)
+
+- Scan generates `pending-review.json`
+- Auto low-risk changes are **held** until you run `confirm`
+- No changes are pushed until confirmed
+- Rejections are recorded in `.learnings/rejections.json`
+
+### Full-Auto
+
+- Low/medium/high risk executed **automatically** per rules
+- No waiting for confirmation
+- Still shows execution preview before running
+- Learning history still tracks approvals
+
+```
+# Switch modes
+auto-evolve.py set-mode semi-auto
+auto-evolve.py set-mode full-auto
+
+# Configure full-auto rules
+auto-evolve.py set-rules --low true --medium false --high false
 ```
 
 ---
@@ -27,7 +58,7 @@ Scheduled Scan → Risk Classification → Auto-Execute (low) → Push
 Scans all configured repositories for changes and optimization opportunities.
 
 ```bash
-# Full scan — auto-execute low-risk, flag medium/high
+# Full scan — respects current mode (semi-auto by default)
 python3 auto-evolve.py scan
 
 # Preview — show what would happen without committing
@@ -36,27 +67,62 @@ python3 auto-evolve.py scan --dry-run
 
 **What it scans:**
 - Git changes (added, modified, removed, untracked files)
-- TODO/FIXME/XXX annotations
+- TODO/FIXME/XXX/HACK/NOTE annotations
 - Duplicate string patterns (3+ occurrences)
 - Long functions (>100 lines)
 - Missing test coverage
 - Pinned/outdated dependencies
 
+**Output:**
+- Iteration saved to `.iterations/{id}/`
+- `pending-review.json` — pending items (sanitized for closed repos)
+- `alert.json` — generated if quality gates fail
+
+---
+
+### confirm
+
+Confirm and execute pending changes in semi-auto mode.
+
+```bash
+# Confirm all pending from most recent iteration
+python3 auto-evolve.py confirm
+
+# Confirm from specific iteration
+python3 auto-evolve.py confirm --iteration 20260405-120000
+```
+
+---
+
+### reject
+
+Reject a pending change and record in learning history.
+
+```bash
+# Reject item 2
+auto-evolve.py reject 2 --reason "too risky"
+
+# Reject from specific iteration
+auto-evolve.py reject 3 --reason "not needed" --iteration 20260405-120000
+```
+
+Rejections are stored in `.learnings/rejections.json` and prevent the same change from being re-recommended.
+
 ---
 
 ### approve
 
-Approve and execute pending changes from the last scan (or a specific iteration).
+Approve and execute pending changes (direct execution, bypasses confirm workflow).
 
 ```bash
 # Approve all pending items
-python3 auto-evolve.py approve --all
+auto-evolve.py approve --all
 
 # Approve specific items by ID
-python3 auto-evolve.py approve 1,3
+auto-evolve.py approve 1,3
 
-# Approve items from a specific iteration
-python3 auto-evolve.py approve --iteration 20260405-120000
+# Approve from a specific iteration
+auto-evolve.py approve --all --iteration 20260405-120000
 ```
 
 ---
@@ -73,7 +139,7 @@ python3 auto-evolve.py repo-add ~/.openclaw/workspace/skills/hawk-bridge --type 
 - `skill` — A skill directory (default)
 - `norms` — Team norms/rules repository
 - `project` — General project repository
-- `closed` — Private/closed project (code changes default to medium risk)
+- `closed` — Private/closed project (code changes default to medium risk, content sanitized)
 
 ---
 
@@ -93,10 +159,51 @@ Rollback changes from a previous iteration using `git revert`.
 
 ```bash
 # Rollback with reason
-python3 auto-evolve.py rollback --to 20260405-120000 --reason "broke feature X"
+auto-evolve.py rollback --to 20260405-120000 --reason "broke feature X"
+```
 
-# Rollback (prompts for reason)
-python3 auto-evolve.py rollback --to 20260405-120000
+---
+
+### schedule
+
+Manage cron scheduling (outputs OpenClaw cron commands).
+
+```bash
+# Set scan interval (hours)
+auto-evolve.py schedule --every 168   # every 168 hours (1 week)
+
+# Show current setup
+auto-evolve.py schedule --show
+
+# Show removal instructions
+auto-evolve.py schedule --remove
+```
+
+**Setup example:**
+```bash
+openclaw cron add --name auto-evolve-scan \
+  --command 'python3 ~/.openclaw/workspace/skills/auto-evolve/scripts/auto-evolve.py scan' \
+  --interval 168h
+```
+
+---
+
+### learnings
+
+View learning history (rejections and approvals).
+
+```bash
+# Show all learnings
+auto-evolve.py learnings
+
+# Show only rejections
+auto-evolve.py learnings --type rejections
+
+# Show only approvals
+auto-evolve.py learnings --type approvals
+
+# Limit output
+auto-evolve.py learnings --limit 10
 ```
 
 ---
@@ -106,7 +213,7 @@ python3 auto-evolve.py rollback --to 20260405-120000
 View iteration history.
 
 ```bash
-python3 auto-evolve.py log --limit 5
+auto-evolve.py log --limit 5
 ```
 
 ---
@@ -115,21 +222,19 @@ python3 auto-evolve.py log --limit 5
 
 | Level | Trigger | Action |
 |-------|---------|--------|
-| 🟢 Low | Docs, README, comments, typo fixes, lint | **Auto-execute + push** |
-| 🟡 Medium | New features, non-breaking additions, optimizations | **Flag for review** |
-| 🔴 High | Breaking changes, deletions, architecture | **Branch + PR** |
+| 🟢 Low | Docs, README, comments, typo fixes, lint | Auto-executable |
+| 🟡 Medium | New features, non-breaking additions, optimizations | Pending review |
+| 🔴 High | Breaking changes, deletions, architecture | Branch + PR |
 
 ### Per-Type Defaults
 
 - `norms` repo: doc changes → low risk
-- `closed` repo: code changes → medium risk
+- `closed` repo: code changes → medium risk (content redacted)
 - `project` repo: test changes → medium risk
 
 ---
 
 ## Proactive Optimizations
-
-Auto-Evolve v2 actively scans for improvement opportunities:
 
 | Type | What it finds | Risk |
 |------|---------------|------|
@@ -141,24 +246,58 @@ Auto-Evolve v2 actively scans for improvement opportunities:
 
 ---
 
-## Approval Workflow
+## Learning History
 
-1. Run `scan` → medium/high risk items → saved to `.iterations/{id}/pending-review.json`
-2. Review the file directly, or run `approve --all` / `approve 1,2,3`
-3. High-risk changes get their own branch + PR via `gh` CLI
-4. Medium/low changes get committed directly and pushed
+Auto-Evolve tracks what you've approved and rejected:
+
+```
+.learnings/
+├── rejections.json    # Changes you've rejected
+└── approvals.json    # Changes you've approved
+```
+
+When scanning, rejected changes are skipped automatically. This prevents the same low-value or rejected optimization from being re-recommended.
 
 ---
 
-## Branch + PR Flow
+## Closed Repository Privacy
 
-For **high-risk** changes:
-1. Creates branch: `auto-evolve/{description}`
-2. Commits the change
-3. Creates GitHub PR with change description and approval instructions
-4. User merges PR manually after reviewing
+For `visibility: "closed"` repositories:
+- `pending-review.json` contains no file paths or code content
+- File paths are replaced with `[REDACTED]`
+- Content hash references used instead
+- Log files do not contain change details
 
-For **low/medium** changes: direct commit to main + auto-push.
+---
+
+## Execution Preview
+
+Before executing (even in full-auto mode), a preview is shown:
+
+```
+⚠️  Full-Auto Mode: About to execute 3 changes:
+  [1] 🟢 LOW: todo-fix: Remove TODO in soulforge/analyzer.py (line 45)
+  [2] 🟢 LOW: lint-fix: Format soulforge/evolver.py
+  [3] 🟡 MEDIUM: add-test: Add test for new ask() function
+```
+
+---
+
+## Quality Gates & Alerts
+
+Quality gates check Python syntax before committing. If gates fail:
+- An `alert.json` is generated in the iteration directory
+- The iteration is flagged with `has_alert: true`
+- The scan continues but reports the failure
+
+```
+.iterations/{id}/
+├── manifest.json
+├── alert.json     # Alert content (if quality gate failed)
+├── plan.md
+├── pending-review.json
+└── report.md
+```
 
 ---
 
@@ -168,9 +307,17 @@ File: `~/.auto-evolverc.json`
 
 ```json
 {
+  "mode": "semi-auto",
+  "full_auto_rules": {
+    "execute_low_risk": true,
+    "execute_medium_risk": false,
+    "execute_high_risk": false
+  },
+  "semi_auto_rules": {
+    "notify_on_each_scan": true,
+    "require_confirm_before_execute": true
+  },
   "schedule_interval_hours": 168,
-  "auto_execute_risk": ["low"],
-  "notify_risk": ["medium", "high"],
   "repositories": [
     {
       "path": "~/.openclaw/workspace/skills/soul-force",
@@ -205,6 +352,16 @@ File: `~/.auto-evolverc.json`
 
 ---
 
+## Branch + PR Flow
+
+For **high-risk** changes:
+1. Creates branch: `auto-evolve/{description}`
+2. Commits the change
+3. Creates GitHub PR with `gh` CLI
+4. User merges PR manually after reviewing
+
+---
+
 ## Iteration Record Format
 
 ```
@@ -213,25 +370,9 @@ File: `~/.auto-evolverc.json`
     └── {id}/
         ├── manifest.json        # Metadata + pending items
         ├── plan.md              # Plan with all changes
-        ├── pending-review.json  # Items awaiting approval
-        └── report.md            # Execution results
-```
-
----
-
-## Project Structure
-
-```
-auto-evolve/
-├── SKILL.md
-├── README.md
-├── CHANGELOG.md
-├── scripts/
-│   └── auto-evolve.py     # Main CLI
-└── references/
-    ├── RISK-CLASSIFICATION.md
-    ├── QUALITY-GATES.md
-    └── NOTIFICATION-TEMPLATE.md
+        ├── pending-review.json  # Items awaiting review (sanitized for closed repos)
+        ├── report.md            # Execution results
+        └── alert.json           # Quality gate alert (if any)
 ```
 
 ---
