@@ -49,3 +49,5 @@ memory/
 
 # Nested skills (this repo IS the skill, not a container)
 skills/
+.iterations/
+.learnings/

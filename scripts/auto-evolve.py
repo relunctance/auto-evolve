@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Auto-Evolve v3.2 — Automated skill iteration manager.
+Auto-Evolve v3.3 — Automated skill iteration manager.
 
-Features (v3.2):
+Features (v3.3):
+- ProductThinkingScanner: asks "what is broken for users?" not "is code clean?"
 - EffectTracker: true before/after effect tracking per iteration
 - CostTracker: LLM call cost tracking with pricing table
 - IssueLinker: auto-close GitHub issues related to committed changes
@@ -895,10 +896,10 @@ def call_llm(prompt: str, system: str = "", model: str = "", base_url: str = "",
     import urllib.request
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
     messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
-    body = json.dumps({"model": model or "MiniMax-M2", "messages": messages, "temperature": 0.3}).encode("utf-8")
+    body = json.dumps({"model": model or "MiniMax-M2", "messages": messages, "temperature": 0.3, "max_tokens": 16000}).encode("utf-8")
     try:
         req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("choices", [{}])[0].get("message", {}).get("content", "")
     except Exception:
@@ -910,14 +911,36 @@ def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> di
     if not config["api_key"] or not config["base_url"]:
         return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
     lang = detect_language_from_path(repo_path)
-    system = "You are a senior code reviewer. Return valid JSON with keys: suggestion, risk_level, implementation_hint. Only JSON."
-    prompt = "Context: " + context + "\n\nCode:\n```" + lang + "\n" + code_snippet[:2000] + "\n```"
+    system = (
+        "You are a senior product evolution advisor. "
+        "Your job is NOT to review code quality — it is to ask the RIGHT questions about the product. "
+        "When you see code, ask: "
+        "  1. What is broken from a USER perspective (not developer)? "
+        "  2. What would make a user say 'this is confusing' or 'why does this exist'? "
+        "  3. What should we STOP doing? "
+        "  4. What is missing that users secretly want but never ask for? "
+        "  5. What is technically clever but practically useless? "
+        "Return valid JSON with keys: "
+        "  suggestion (a sharp, opinionated product question or stop-doing THIS, max 200 chars), "
+        "  risk_level (low/medium/high), "
+        "  implementation_hint (one concrete next step, max 100 chars), "
+        "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature). "
+        "Only JSON. Be brutally honest. Prefer 'stop doing X' over 'add more features'."
+    )
+    prompt = (
+        "IMPORTANT: Answer with ONLY a JSON object. No explanation, no markdown fences.\n\n"
+        "Code:\n```" + lang + "\n" + code_snippet[:2000] + "\n```\n\n"
+        "Context: " + context + "\n\n"
+        "Ask: what is really broken here? What should we stop, start, or question?"
+    )
     result = call_llm(prompt=prompt, system=system, model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
     if not result:
-        return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
+        return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False, "category": "unknown"}
     try:
         parsed = json.loads(result)
         parsed["available"] = True
+        if "category" not in parsed:
+            parsed["category"] = "user_complaint"
         return parsed
     except json.JSONDecodeError:
         m = re.search(r'\{[^{}]*\}', result, re.DOTALL)
@@ -925,10 +948,12 @@ def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> di
             try:
                 parsed = json.loads(m.group())
                 parsed["available"] = True
+                if "category" not in parsed:
+                    parsed["category"] = "user_complaint"
                 return parsed
             except Exception:
                 pass
-        return {"suggestion": result.strip()[:200], "risk_level": "medium", "implementation_hint": "", "available": True}
+        return {"suggestion": result.strip()[:200], "risk_level": "medium", "implementation_hint": "", "available": True, "category": "user_complaint"}
 
 
 # ===========================================================
@@ -1055,6 +1080,7 @@ def _call_llm_for_refactor(
         body = {
             "model": config.get("model", "MiniMax-M2"),
             "messages": messages,
+            "max_tokens": 16000,
             "temperature": 0.2,
         }
         endpoint = base_url + "/chat/completions"
@@ -1070,14 +1096,21 @@ def _call_llm_for_refactor(
             data = json.loads(resp.read().decode("utf-8"))
             # Parse response based on API type
             if "anthropic" in endpoint:
-                # Anthropic response format: may contain 'thinking' and 'text' blocks
-                # We only want 'text' blocks with actual code content
+                # Anthropic/MiniMax response format: may contain 'thinking' and 'text' blocks
+                # Prefer text blocks, but fall back to thinking blocks if no text
                 text_blocks = [
                     b.get("text", "") for b in data.get("content", [])
                     if b.get("type") == "text" and b.get("text", "").strip()
                 ]
-                # Prefer the longest text block (likely the actual code)
-                content = max(text_blocks, key=len) if text_blocks else ""
+                if text_blocks:
+                    content = max(text_blocks, key=len)
+                else:
+                    # Fall back to thinking blocks — extract the thinking content
+                    thinking_blocks = [
+                        b.get("thinking", "") for b in data.get("content", [])
+                        if b.get("type") == "thinking" and b.get("thinking", "").strip()
+                    ]
+                    content = "\n".join(thinking_blocks)
             else:
                 # OpenAI response format
                 content = (
@@ -2791,6 +2824,234 @@ def run_llm_analysis_on_changes(
     return changes
 
 
+# ============================================================
+# v3.3: Product Thinking Scanner
+# Changes the question from "is the code clean?" to
+# "what is broken from a USER perspective?"
+# ============================================================
+
+PRODUCT_CATEGORIES = (
+    "user_complaint",
+    "friction_point",
+    "unused_feature",
+    "competitive_gap",
+    "stop_doing",
+    "add_feature",
+)
+
+
+@dataclass
+class ProductThinkingFinding:
+    """A product-level insight about what should evolve, not just what should be cleaned up."""
+    description: str
+    category: str
+    evidence: list[str]
+    impact_score: float
+    suggested_direction: str
+    file_path: str
+    risk: RiskLevel = RiskLevel.MEDIUM
+
+
+class ProductThinkingScanner:
+    """
+    Scans the codebase asking: what is actually broken for users?
+    This is NOT a code quality scanner.
+    """
+
+    def __init__(self, repos: list[Repository], config: dict) -> None:
+        self.repos = repos
+        self.config = config
+
+    def scan(self) -> list[ProductThinkingFinding]:
+        all_findings: list[ProductThinkingFinding] = []
+        print(f"[ProductThinkingScanner] Starting scan of {len(self.repos)} repos...")
+        for repo in self.repos:
+            if not repo.auto_monitor:
+                continue
+            repo_path = repo.resolve_path()
+            if not repo_path.exists():
+                continue
+            findings = self._scan_key_files(repo)
+            all_findings.extend(findings)
+            learnings_findings = self._analyze_learnings_patterns(repo)
+            all_findings.extend(learnings_findings)
+        all_findings.sort(key=lambda f: f.impact_score, reverse=True)
+        return all_findings
+
+    def _scan_key_files(self, repo: Repository) -> list[ProductThinkingFinding]:
+        findings: list[ProductThinkingFinding] = []
+        repo_path = repo.resolve_path()
+        priority_files: list[Path] = []
+        for fp in [repo_path / "README.md", repo_path / "SOUL.md", repo_path / "AGENTS.md"]:
+            if fp.exists():
+                priority_files.append(fp)
+        for skill_dir in (repo_path / "skills").glob("*"):
+            md = skill_dir / "SKILL.md"
+            if md.exists():
+                priority_files.append(md)
+        for script in list(repo_path.glob("scripts/*.py")) + list(repo_path.glob("*.py")):
+            if script.exists():
+                priority_files.append(script)
+        for fp in priority_files:
+            try:
+                content = fp.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            rel = str(fp.relative_to(repo_path))
+            if len(content) > 8000:
+                content = content[:8000]
+            finding = self._analyze_file_for_product_thinking(content, rel, repo)
+            if finding:
+                findings.append(finding)
+        return findings
+
+    def _analyze_file_for_product_thinking(
+        self, content: str, file_path: str, repo: Repository
+    ) -> Optional[ProductThinkingFinding]:
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return None
+        system = (
+            "You are a brutally honest product advisor. "
+            "You see code and docs, and you ask: "
+            "  1. What would a user complain about after 5 minutes of this? "
+            "  2. What is this project's blind spot — the thing they built but nobody asked for? "
+            "  3. What is secretly annoying but presented as a feature? "
+            "  4. What should they STOP doing and start doing instead? "
+            "Answer ONLY with a JSON object with keys: "
+            "  insight (max 150 chars, sharp and honest), "
+            "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature), "
+            "  impact (0.0 to 1.0), "
+            "  evidence (array of 1-2 short text snippets from the content). "
+            "If nothing significant is broken, return {\"insight\": \"\", \"category\": \"ok\", \"impact\": 0.0, \"evidence\": []}. "
+            "Be harsh. Surface the uncomfortable truth."
+        )
+        lang = detect_language_from_path(file_path)
+        prompt = (
+            "IMPORTANT: Answer with ONLY a JSON object. No explanation.\n\n"
+            f"File: {file_path}\n\n"
+            f"Content (excerpt):\n```{lang}\n{content[:5000]}\n```\n\n"
+            "What is broken from a user's perspective?"
+        )
+        result = call_llm(prompt=prompt, system=system, model=config["model"],
+                          base_url=config["base_url"], api_key=config["api_key"])
+        if not result:
+            return None
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            m = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+            if not m:
+                return None
+            try:
+                parsed = json.loads(m.group())
+            except Exception:
+                return None
+        insight = parsed.get("insight", "").strip()
+        if not insight or parsed.get("category") == "ok" or parsed.get("impact", 0.0) == 0.0:
+            return None
+        return ProductThinkingFinding(
+            description=insight,
+            category=parsed.get("category", "user_complaint"),
+            evidence=parsed.get("evidence", []),
+            impact_score=float(parsed.get("impact", 0.5)),
+            suggested_direction="",
+            file_path=file_path,
+            risk=RiskLevel.MEDIUM,
+        )
+
+    def _analyze_learnings_patterns(self, repo: Repository) -> list[ProductThinkingFinding]:
+        findings: list[ProductThinkingFinding] = []
+        learnings = load_learnings()
+        rejections = learnings.get("rejections", [])
+        approvals = learnings.get("approvals", [])
+        if not rejections:
+            return findings
+        reason_count: dict[str, int] = {}
+        type_count: dict[str, int] = {}
+        for r in rejections:
+            reason = r.get("reason", "no reason given")[:80]
+            desc = r.get("description", "")[:80]
+            reason_count[reason] = reason_count.get(reason, 0) + 1
+            type_count[desc] = type_count.get(desc, 0) + 1
+        for reason, count in reason_count.items():
+            if count >= 3:
+                findings.append(ProductThinkingFinding(
+                    description=(
+                        f"STOP: This keeps getting rejected ({count}x) — '{reason}'. "
+                        "Auto-evolve keeps trying the same thing. Rules need adjustment."
+                    ),
+                    category="stop_doing",
+                    evidence=[f"Rejected {count} times: {reason}"],
+                    impact_score=min(1.0, count * 0.2),
+                    suggested_direction="Review full_auto_rules. This pattern keeps failing.",
+                    file_path="auto-evolve config",
+                    risk=RiskLevel.HIGH,
+                ))
+        for desc, count in type_count.items():
+            if count >= 3:
+                findings.append(ProductThinkingFinding(
+                    description=(
+                        f"Stop attempting this: '{desc}' — rejected {count} times. "
+                        "The system keeps generating changes nobody wants."
+                    ),
+                    category="unused_feature",
+                    evidence=[f"Rejected {count} times: {desc}"],
+                    impact_score=min(1.0, count * 0.25),
+                    suggested_direction=f"Add to learnings blocklist.",
+                    file_path="auto-evolve learnings",
+                    risk=RiskLevel.MEDIUM,
+                ))
+        approval_themes: dict[str, int] = {}
+        for a in approvals:
+            theme = a.get("description", "")[:50]
+            approval_themes[theme] = approval_themes.get(theme, 0) + 1
+        for theme, count in approval_themes.items():
+            if count >= 5:
+                findings.append(ProductThinkingFinding(
+                    description=(
+                        f"This type of change keeps getting approved ({count}x): '{theme}'. "
+                        "Consider doing MORE of this automatically."
+                    ),
+                    category="add_feature",
+                    evidence=[f"Approved {count} times: {theme}"],
+                    impact_score=min(1.0, count * 0.15),
+                    suggested_direction="Increase auto-execution of this category",
+                    file_path="auto-evolve learnings",
+                    risk=RiskLevel.LOW,
+                ))
+        return findings
+
+
+def print_product_findings(findings: list[ProductThinkingFinding]) -> None:
+    if not findings:
+        print(f"\n🎯 Product Evolution Insights: none (all clear — or LLM returned empty)")
+        return
+    print(f"\n🎯 Product Evolution Insights (from {len(findings)} finding(s)):")
+    print("=" * 60)
+    icons = {
+        "user_complaint": "😤",
+        "friction_point": "🛑",
+        "unused_feature": "💤",
+        "competitive_gap": "📊",
+        "stop_doing": "🚫",
+        "add_feature": "✨",
+    }
+    for i, f in enumerate(findings[:10], 1):
+        icon = icons.get(f.category, "❓")
+        impact_bar = "█" * int(f.impact_score * 10) + "░" * (10 - int(f.impact_score * 10))
+        print(f"\n  {i}. {icon} [{f.category.replace('_', ' ').upper()}]")
+        print(f"     {f.description}")
+        if f.evidence:
+            print(f"     Evidence: {' | '.join(str(e)[:60] for e in f.evidence[:2])}")
+        print(f"     Impact: {impact_bar} {f.impact_score:.1f}")
+        if f.suggested_direction:
+            print(f"     → {f.suggested_direction}")
+        print(f"     File: {f.file_path}")
+    if len(findings) > 10:
+        print(f"\n  ... and {len(findings) - 10} more insights")
+
+
 # ===========================================================
 # Main Scan Logic
 # ===========================================================
@@ -3376,7 +3637,7 @@ def cmd_scan(args) -> int:
     rules = get_full_auto_rules(config)
     learnings = load_learnings()
 
-    print("🔍 Auto-Evolve v3.2 Scanner")
+    print("🔍 Auto-Evolve v3.3 Scanner")
     print(f"   Mode: {mode.value}")
     print("=" * 50)
 
@@ -3401,6 +3662,12 @@ def cmd_scan(args) -> int:
 
     # Print scan summary and priority queue
     _print_scan_summary(all_changes, all_opts, auto_exec, pending_sorted, mode, dry_run, rules)
+
+    # v3.3: Product Thinking Scanner — ask the RIGHT questions
+    print("\n" + "=" * 50)
+    product_scanner = ProductThinkingScanner(repos, config)
+    product_findings = product_scanner.scan()
+    print_product_findings(product_findings)
 
     # Build plan and report lines
     plan_lines, report_lines, pending_items = _build_plan_and_report(
@@ -4329,7 +4596,7 @@ def cmd_costs(args) -> int:
 def _build_argument_parser() -> argparse.ArgumentParser:
     """Build and return the root argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
-        description="Auto-Evolve v3.2 — LLM-driven automated skill iteration manager",
+        description="Auto-Evolve v3.3 — LLM-driven automated skill iteration manager",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
