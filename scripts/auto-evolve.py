@@ -4189,6 +4189,20 @@ def cmd_scan(args) -> int:
     rules = get_full_auto_rules(config)
     learnings = load_learnings()
 
+    # Filter to a single repo if --repo is specified
+    if getattr(args, 'repo', '').strip():
+        target = args.repo.strip()
+        original = list(config.get("repositories", []))
+        config["repositories"] = [
+            r for r in original
+            if str(Path(r["path"]).resolve()) == str(Path(target).resolve())
+        ]
+        if not config["repositories"]:
+            print(f"❌ Repository not found in config: {target}")
+            print(f"   Configured repos: {[r['path'] for r in original]}")
+            return 1
+        print(f"🎯 Targeting single repo: {target}")
+
     print("🔍 Auto-Evolve v3.5 Scanner")
     print(f"   Mode: {mode.value}")
     print("=" * 50)
@@ -5183,6 +5197,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         choices=["auto", "openclaw", "hawkbridge", "both"],
         default="auto",
         help="Memory source: auto (openclaw primary+hawkbridge supplement), openclaw, hawkbridge, or both"
+    )
+    scan_p.add_argument(
+        "--repo", type=str, default="",
+        help="Scan only the specified repository path (default: all configured repos)"
     )
 
     # confirm
