@@ -3822,6 +3822,14 @@ class FourPerspectiveScanner:
                 lines.append(trend)
                 lines.append("")
 
+        if not findings:
+            lines.append("✅ **All Clear** — No issues found across all four perspectives.")
+            lines.append("")
+            lines.append("_This project passed the auto-evolve inspection._")
+            lines.append("---")
+            lines.append("_Auto-evolved by [auto-evolve](https://github.com/relunctance/auto-evolve)_")
+            return "\n".join(lines)
+
         lines.append(f"Found **{len(findings)}** finding(s):")
         lines.append("")
 
@@ -6462,43 +6470,6 @@ def cmd_set_rules(args) -> int:
 
 
 def cmd_learnings(args) -> int:
-    data = load_learnings()
-
-    if args.type == "rejections" or args.type is None:
-        rejections = data.get("rejections", [])
-        print(f"📕 Rejections ({len(rejections)} total):")
-        print("=" * 50)
-        if not rejections:
-            print("  (none)")
-        for r in rejections[: args.limit or 20]:
-            print(f"  [{r['date']}] {r['repo'].split('/')[-1]}")
-            print(f"    {r['description'][:70]}")
-            if r.get("reason"):
-                print(f"    Reason: {r['reason']}")
-            print()
-
-    if args.type == "approvals" or args.type is None:
-        approvals = data.get("approvals", [])
-        print(f"📗 Approvals ({len(approvals)} total):")
-        print("=" * 50)
-        if not approvals:
-            print("  (none)")
-        for a in approvals[: args.limit or 20]:
-            print(f"  [{a['date']}] {a['repo'].split('/')[-1]}")
-            print(f"    {a['description'][:70]}")
-            if a.get("reason"):
-                print(f"    Reason: {a['reason']}")
-            if a.get("approved_by"):
-                print(f"    Approved by: {a['approved_by']}")
-            print()
-
-    if args.type not in ("rejections", "approvals", None):
-        print(f"❌ Unknown type: {args.type}. Use --type rejections or --type approvals.")
-        return 1
-    return 0
-
-
-def cmd_learnings(args) -> int:
     """Show learning history with optional summary statistics. v4.3."""
     data = load_learnings()
     rejections = data.get("rejections", [])
@@ -6575,9 +6546,7 @@ def cmd_learnings(args) -> int:
 
 def cmd_trends(args) -> int:
     """Show scan trends for repositories. v4.3."""
-    from auto_evolve import Repository, load_config
     import json
-    from pathlib import Path
 
     config = load_config()
     repos = [Repository(**r) for r in config.get("repositories", [])]
