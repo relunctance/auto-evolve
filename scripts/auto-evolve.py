@@ -6498,6 +6498,148 @@ def cmd_learnings(args) -> int:
     return 0
 
 
+def cmd_learnings(args) -> int:
+    """Show learning history with optional summary statistics. v4.3."""
+    data = load_learnings()
+    rejections = data.get("rejections", [])
+    approvals = data.get("approvals", [])
+
+    # v4.3: --summary shows statistics
+    if getattr(args, "summary", False):
+        print("📊 Learnings Summary")
+        print("=" * 50)
+        print(f"  Total rejections: {len(rejections)}")
+        print(f"  Total approvals: {len(approvals)}")
+        if rejections:
+            print(f"  Rejection rate: {len(rejections)/(len(rejections)+len(approvals))*100:.1f}%")
+        if len(rejections) > 0:
+            print("\n  Top rejection reasons:")
+            reason_count: dict = {}
+            for r in rejections:
+                reason = r.get("reason", "(no reason)")[:60]
+                reason_count[reason] = reason_count.get(reason, 0) + 1
+            top = sorted(reason_count.items(), key=lambda x: -x[1])[:5]
+            for reason, count in top:
+                print(f"    [{count}x] {reason}")
+        if len(rejections) > 0:
+            print(f"\n  Most rejected repo:")
+            repo_count: dict = {}
+            for r in rejections:
+                repo = r.get("repo", "unknown")
+                repo_count[repo] = repo_count.get(repo, 0) + 1
+            most_rejected = sorted(repo_count.items(), key=lambda x: -x[1])[0]
+            print(f"    {most_rejected[0].split('/')[-1]}: {most_rejected[1]} rejections")
+        if len(approvals) > 0:
+            print(f"\n  Most approved repo:")
+            repo_count = {}
+            for a in approvals:
+                repo = a.get("repo", "unknown")
+                repo_count[repo] = repo_count.get(repo, 0) + 1
+            most_approved = sorted(repo_count.items(), key=lambda x: -x[1])[0]
+            print(f"    {most_approved[0].split('/')[-1]}: {most_approved[1]} approvals")
+        return 0
+
+    if args.type == "rejections" or args.type is None:
+        rejections = data.get("rejections", [])
+        print(f"📕 Rejections ({len(rejections)} total):")
+        print("=" * 50)
+        if not rejections:
+            print("  (none)")
+        for r in rejections[: args.limit or 20]:
+            print(f"  [{r.get('date', '?')}] {r.get('repo', '?').split('/')[-1]}")
+            print(f"    {r.get('description', '')}")
+            if r.get("reason"):
+                print(f"    Reason: {r.get('reason', '')}")
+            print()
+
+    if args.type == "approvals" or args.type is None:
+        approvals = data.get("approvals", [])
+        print(f"📗 Approvals ({len(approvals)} total):")
+        print("=" * 50)
+        if not approvals:
+            print("  (none)")
+        for a in approvals[: args.limit or 20]:
+            print(f"  [{a.get('date', '?')}] {a.get('repo', '?').split('/')[-1]}")
+            print(f"    {a.get('description', '')}")
+            if a.get("reason"):
+                print(f"    Reason: {a.get('reason', '')}")
+            if a.get("approved_by"):
+                print(f"    Approved by: {a.get('approved_by', '')}")
+            print()
+
+    if args.type not in ("rejections", "approvals", None):
+        print(f"❌ Unknown type: {args.type}. Use --type rejections or --type approvals.")
+        return 1
+    return 0
+
+
+def cmd_trends(args) -> int:
+    """Show scan trends for repositories. v4.3."""
+    from auto_evolve import Repository, load_config
+    import json
+    from pathlib import Path
+
+    config = load_config()
+    repos = [Repository(**r) for r in config.get("repositories", [])]
+    target = args.repo.strip() if args.repo else ""
+
+    if args.all:
+        targets = repos
+    elif target:
+        targets = [r for r in repos if target in str(r.path)]
+        if not targets:
+            print(f"❌ Repo not found: {target}")
+            return 1
+    else:
+        print("Usage: auto-evolve trends --repo <path> OR --all")
+        return 1
+
+    print("📈 Scan Trends")
+    print("=" * 60)
+    for repo in targets:
+        repo_path = repo.resolve_path()
+        history_file = repo_path / ".auto-evolve" / "scan-history.json"
+        print(f"\n{'📁 ' + repo_path.name}")
+        print(f"   Path: {repo_path}")
+
+        if not history_file.exists():
+            print("   Status: No scan history (run `auto-evolve scan` first)")
+            continue
+
+        try:
+            data = json.loads(history_file.read_text(encoding="utf-8"))
+            # Find first repo entry
+            scans = None
+            for v in data.values():
+                if isinstance(v, list) and len(v) > 0:
+                    scans = v
+                    break
+            if not scans or len(scans) < 2:
+                print(f"   Status: Need at least 2 scans for trend (have {len(scans) if scans else 0})")
+                continue
+
+            # Count findings per scan
+            counts = []
+            for scan in scans[:5]:
+                total = sum(len(f) if isinstance(f, list) else 0 for f in scan.values() if isinstance(f, list))
+                counts.append(total)
+
+            counts_reversed = list(reversed(counts))
+            print(f"   Recent scans: {' → '.join(str(c) for c in counts_reversed)}")
+
+            if len(counts) >= 2:
+                delta = counts[0] - counts[1]
+                if delta > 0:
+                    print(f"   Trend: 📈 +{delta} findings since last scan")
+                elif delta < 0:
+                    print(f"   Trend: 📉 {delta} findings (improved)")
+                else:
+                    print(f"   Trend: ➡️  No change")
+        except Exception as e:
+            print(f"   Error reading history: {e}")
+    return 0
+
+
 def cmd_log(args) -> int:
     catalog = load_catalog()
     if not catalog["iterations"]:
@@ -6701,6 +6843,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     # repo-list
     subparsers.add_parser("repo-list", help="List configured repositories")
 
+    # trends (v4.3)
+    trends_p = subparsers.add_parser("trends", help="Show scan trends for repositories (v4.3)")
+    trends_p.add_argument("--repo", type=str, default="", help="Specific repo path to show trends for")
+    trends_p.add_argument("--all", action="store_true", help="Show trends for all monitored repos")
+
     # rollback
     rollback_p = subparsers.add_parser("rollback", help="Rollback to a previous iteration")
     rollback_p.add_argument("--to", required=True, dest="to", type=str, help="Target version")
@@ -6734,6 +6881,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     learnings_p = subparsers.add_parser("learnings", help="Show learning history")
     learnings_p.add_argument("--type", type=str, choices=["rejections", "approvals"], help="Filter by type")
     learnings_p.add_argument("--limit", type=int, default=20, help="Limit entries")
+    learnings_p.add_argument("--summary", action="store_true", help="Show summary statistics (v4.3)")
 
     # log
     log_p = subparsers.add_parser("log", help="Show iteration log")
@@ -6769,6 +6917,7 @@ def main() -> int:
         "set-mode": cmd_set_mode,
         "set-rules": cmd_set_rules,
         "learnings": cmd_learnings,
+        "trends": cmd_trends,
         "log": cmd_log,
         "effects": cmd_effects,
         "costs": cmd_costs,
