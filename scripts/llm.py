@@ -120,7 +120,6 @@ def _strip_code_fences(text: str) -> str:
     content = "\n".join(lines).strip()
     if not content:
         return ""
-    # Count code-like vs prose lines
     code_indicators = [
         "def ", "class ", "import ", "from ", "if ", "else:",
         "return ", "for ", "while ", "async ", "@",
@@ -128,18 +127,30 @@ def _strip_code_fences(text: str) -> str:
         "package ", "export ", "module ",
     ]
     non_empty_lines = [l for l in lines if l.strip()]
+    # If less than 30% of non-empty lines are code-like, try to find code start
     prose_lines = sum(
         1 for l in non_empty_lines
         if not any(l.strip().startswith(ind) for ind in code_indicators)
     )
     total = len(non_empty_lines)
-    # If less than 30% of non-empty lines are code-like, it's likely prose
     if total > 5 and (total - prose_lines) / total < 0.3:
         for i, line in enumerate(non_empty_lines):
             stripped = line.strip()
             if any(stripped.startswith(ind) for ind in code_indicators):
-                return "\n".join(non_empty_lines[i:]).strip()
-        return ""  # No real code found
+                # Take from first code line onward, then re-check ratio
+                code_block = "\n".join(non_empty_lines[i:]).strip()
+                block_lines = [l for l in code_block.splitlines() if l.strip()]
+                if not block_lines:
+                    return ""
+                block_prose = sum(
+                    1 for l in block_lines
+                    if not any(l.strip().startswith(ind) for ind in code_indicators)
+                )
+                # If more than 50% of the "code block" is prose, reject
+                if block_prose / len(block_lines) > 0.5:
+                    return ""
+                return code_block
+        return ""
     return content
 
 
