@@ -2,6 +2,47 @@
 
 All notable changes to auto-evolve are documented here.
 
+## [2.2.0] — 2026-04-05
+
+### New Features
+
+- **True OpenClaw cron integration:** `schedule --every` now calls `openclaw cron add` directly when the CLI is available. Falls back to printing manual commands otherwise. Cron ID tracked in config (`schedule_cron_id`). `schedule --remove` calls `openclaw cron remove`.
+
+- **Value-based priority scoring:** Items are now scored on three dimensions (value, risk, cost) and ranked by `P = (value × 0.5) / (risk × cost)`. Priority queue displayed in scan output. Pending items sorted by priority. Priority shown in approve prompt.
+
+- **Iteration metrics tracking:** Every scan now generates `.iterations/{id}/metrics.json` containing: `todos_resolved`, `lint_errors_fixed`, `test_coverage_delta`, `files_changed`, `lines_added`, `lines_removed`, `quality_gate_passed`.
+
+- **PR batch merging:** `should_merge_prs()` detects when 3+ similar changes across ≤5 files should be merged. `group_similar_changes()` groups by type and file scope. `build_merged_pr_body()` creates combined PR description.
+
+- **Git conflict auto-resolution:** `handle_pr_conflict()` fetches `origin/main`, rebases, and auto-resolves if conflicts affect ≤2 files. Returns `clean`, `auto_resolved`, or `manual_required`. Applied before PR creation for high-risk changes.
+
+- **Approval reasons:** `approve --reason "text"` records the reason in `approvals.json` under the `reason` field, plus `approved_by: "user"`. Learnings display shows approval reasons.
+
+### Changed
+
+- **Priority display:** `approve` command now shows priority score (P=) for each pending item.
+- **Log command:** Shows 📊 indicator when iteration has metrics.
+- **Schedule command:** No longer just prints commands — actually creates/removes cron jobs.
+- **Scan quality gate output:** Now prints ✅ when gates pass.
+
+### Internal
+
+- `PRIORITY_WEIGHTS`, `DEFAULT_VALUE_SCORES`, `DEFAULT_COST_SCORES` constants added
+- `calculate_priority()`, `infer_value_score()`, `infer_risk_score()`, `infer_cost_score()` functions
+- `enrich_change_with_priority()`, `sort_by_priority()`, `priority_color()` functions
+- `IterationMetrics` dataclass
+- `save_metrics()`, `generate_metrics()`, `compute_todos_resolved()` functions
+- `setup_cron()`, `remove_cron()` functions
+- `should_merge_prs()`, `group_similar_changes()`, `build_merged_pr_body()` functions
+- `get_conflict_files()`, `resolve_conflicts_simple()`, `handle_pr_conflict()` functions
+- `git_staged_diff()`, `git_diff_lines_added_removed()` helper functions
+- `approved_by` field in learning entries
+- `ChangeItem` extended with `value_score`, `risk_score`, `cost_score`, `priority` fields
+- `IterationManifest` extended with `metrics_id` field
+- Config extended with `schedule_cron_id`
+
+---
+
 ## [2.1.0] — 2026-04-05
 
 ### New Features

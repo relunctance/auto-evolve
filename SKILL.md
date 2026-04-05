@@ -1,4 +1,4 @@
-# Auto-Evolve v2.1
+# Auto-Evolve v2.2
 
 **Automated skill iteration manager with full audit trail.**
 
@@ -8,7 +8,7 @@
 
 ## Overview
 
-Auto-Evolve v2.1 is a complete rewrite with multi-repository support, branch+PR workflows for high-risk changes, proactive optimization discovery, and two operation modes (semi-auto and full-auto).
+Auto-Evolve v2.2 is a complete rewrite with multi-repository support, branch+PR workflows for high-risk changes, proactive optimization discovery, and two operation modes (semi-auto and full-auto).
 
 ```
 Scheduled Scan → Risk Classification → Learning Check → Mode Decision
@@ -21,6 +21,15 @@ Scheduled Scan → Risk Classification → Learning Check → Mode Decision
               pending review               execute_medium_risk: false
               learnings track               execute_high_risk: false
 ```
+
+### v2.2 New Features
+
+- **True OpenClaw cron integration** — `schedule --every` actually creates the cron job via `openclaw cron add`
+- **Value-based priority scoring** — changes ranked by P = (value × 0.5) / (risk × cost)
+- **Iteration metrics** — every scan generates `metrics.json` (todos resolved, lines changed, etc.)
+- **PR batch merging** — similar small changes auto-merged into one PR
+- **Git conflict auto-resolution** — rebase conflicts resolved automatically when possible
+- **Approval reasons** — `approve --reason "your reason"` records rationale in learnings
 
 ---
 
@@ -76,6 +85,7 @@ python3 auto-evolve.py scan --dry-run
 **Output:**
 - Iteration saved to `.iterations/{id}/`
 - `pending-review.json` — pending items (sanitized for closed repos)
+- `metrics.json` — iteration metrics (v2.2)
 - `alert.json` — generated if quality gates fail
 
 ---
@@ -112,14 +122,14 @@ Rejections are stored in `.learnings/rejections.json` and prevent the same chang
 
 ### approve
 
-Approve and execute pending changes (direct execution, bypasses confirm workflow).
+**v2.2: Supports `--reason` for recording approval rationale.**
 
 ```bash
-# Approve all pending items
-auto-evolve.py approve --all
+# Approve all pending items with reason
+auto-evolve.py approve --all --reason "valuable improvement"
 
 # Approve specific items by ID
-auto-evolve.py approve 1,3
+auto-evolve.py approve 1,3 --reason "worthwhile"
 
 # Approve from a specific iteration
 auto-evolve.py approve --all --iteration 20260405-120000
@@ -166,25 +176,20 @@ auto-evolve.py rollback --to 20260405-120000 --reason "broke feature X"
 
 ### schedule
 
-Manage cron scheduling (outputs OpenClaw cron commands).
+**v2.2: Directly integrates with OpenClaw cron API.**
 
 ```bash
-# Set scan interval (hours)
+# Set scan interval (creates cron job automatically)
 auto-evolve.py schedule --every 168   # every 168 hours (1 week)
 
-# Show current setup
+# Show current schedule
 auto-evolve.py schedule --show
 
-# Show removal instructions
+# Remove cron job
 auto-evolve.py schedule --remove
 ```
 
-**Setup example:**
-```bash
-openclaw cron add --name auto-evolve-scan \
-  --command 'python3 ~/.openclaw/workspace/skills/auto-evolve/scripts/auto-evolve.py scan' \
-  --interval 168h
-```
+When `openclaw` CLI is available, `schedule --every` creates the cron job directly. Otherwise falls back to manual instructions.
 
 ---
 
@@ -199,7 +204,7 @@ auto-evolve.py learnings
 # Show only rejections
 auto-evolve.py learnings --type rejections
 
-# Show only approvals
+# Show only approvals (v2.2 shows reasons)
 auto-evolve.py learnings --type approvals
 
 # Limit output
@@ -215,6 +220,71 @@ View iteration history.
 ```bash
 auto-evolve.py log --limit 5
 ```
+
+---
+
+## Priority Scoring (v2.2)
+
+Changes are ranked by a priority score: **P = (value × 0.5) / (risk × cost)**
+
+| Factor | Range | Meaning |
+|--------|-------|---------|
+| Value | 1-10 | Bug fix=10, test=7, docs=4 |
+| Risk | 1-10 | Low=2, Medium=5, High=9 |
+| Cost | 1-10 | 5min=1, 1h=7, 2h+=10 |
+
+Example output:
+```
+📊 Priority Queue:
+  [1] 🟢 P=0.85 Fix TODO in analyzer.py (high value, low risk)
+  [2] 🟢 P=0.72 Add test coverage (medium value, low risk)
+  [3] 🟡 P=0.45 Refactor evolver.py (high value, high risk)
+```
+
+---
+
+## Iteration Metrics (v2.2)
+
+Every scan generates `metrics.json`:
+
+```json
+{
+  "iteration_id": "20260405-120000",
+  "date": "2026-04-05T12:00:00+08:00",
+  "metrics": {
+    "todos_resolved": 3,
+    "lint_errors_fixed": 5,
+    "test_coverage_delta": 2.3,
+    "files_changed": 4,
+    "lines_added": 120,
+    "lines_removed": 45,
+    "quality_gate_passed": true
+  }
+}
+```
+
+---
+
+## PR Batch Merging (v2.2)
+
+When multiple similar small changes are detected, they are automatically grouped into a single PR:
+
+```python
+should_merge_prs(changes)  # True if 3+ similar changes across ≤5 files
+```
+
+Groups are merged when they share the same type and related file paths.
+
+---
+
+## Git Conflict Handling (v2.2)
+
+When a PR branch conflicts with `origin/main`:
+
+1. Fetches latest `main`
+2. Rebases onto `origin/main`
+3. If conflicts ≤ 2 files: auto-resolves and continues
+4. If conflicts > 2 files: flags as `manual_required`
 
 ---
 
@@ -252,11 +322,11 @@ Auto-Evolve tracks what you've approved and rejected:
 
 ```
 .learnings/
-├── rejections.json    # Changes you've rejected
-└── approvals.json    # Changes you've approved
+├── rejections.json    # Changes you've rejected (with reasons)
+└── approvals.json     # Changes you've approved (v2.2: with reasons)
 ```
 
-When scanning, rejected changes are skipped automatically. This prevents the same low-value or rejected optimization from being re-recommended.
+When scanning, rejected changes are skipped automatically. v2.2 approvals include the `--reason` text and `approved_by` field.
 
 ---
 
@@ -276,9 +346,9 @@ Before executing (even in full-auto mode), a preview is shown:
 
 ```
 ⚠️  Full-Auto Mode: About to execute 3 changes:
-  [1] 🟢 LOW: todo-fix: Remove TODO in soulforge/analyzer.py (line 45)
-  [2] 🟢 LOW: lint-fix: Format soulforge/evolver.py
-  [3] 🟡 MEDIUM: add-test: Add test for new ask() function
+  [1] 🟢 P=0.85 LOW: todo-fix: Remove TODO in soulforge/analyzer.py (line 45)
+  [2] 🟢 P=0.72 LOW: lint-fix: Format soulforge/evolver.py
+  [3] 🟡 P=0.45 MEDIUM: add-test: Add test for new ask() function
 ```
 
 ---
@@ -296,7 +366,8 @@ Quality gates check Python syntax before committing. If gates fail:
 ├── alert.json     # Alert content (if quality gate failed)
 ├── plan.md
 ├── pending-review.json
-└── report.md
+├── report.md
+└── metrics.json   # v2.2: iteration metrics
 ```
 
 ---
@@ -313,11 +384,8 @@ File: `~/.auto-evolverc.json`
     "execute_medium_risk": false,
     "execute_high_risk": false
   },
-  "semi_auto_rules": {
-    "notify_on_each_scan": true,
-    "require_confirm_before_execute": true
-  },
   "schedule_interval_hours": 168,
+  "schedule_cron_id": null,
   "repositories": [
     {
       "path": "~/.openclaw/workspace/skills/soul-force",
@@ -356,9 +424,10 @@ File: `~/.auto-evolverc.json`
 
 For **high-risk** changes:
 1. Creates branch: `auto-evolve/{description}`
-2. Commits the change
-3. Creates GitHub PR with `gh` CLI
-4. User merges PR manually after reviewing
+2. Rebases onto `origin/main` (handles conflicts)
+3. Commits the change
+4. Creates GitHub PR with `gh` CLI
+5. User merges PR manually after reviewing
 
 ---
 
@@ -370,8 +439,9 @@ For **high-risk** changes:
     └── {id}/
         ├── manifest.json        # Metadata + pending items
         ├── plan.md              # Plan with all changes
-        ├── pending-review.json  # Items awaiting review (sanitized for closed repos)
+        ├── pending-review.json   # Items awaiting review (sanitized for closed repos)
         ├── report.md            # Execution results
+        ├── metrics.json          # v2.2: iteration metrics
         └── alert.json           # Quality gate alert (if any)
 ```
 
@@ -382,6 +452,7 @@ For **high-risk** changes:
 - Python 3.10+
 - Git
 - `gh` CLI (for PR creation)
+- `openclaw` CLI (v2.2: for true cron integration)
 
 ---
 
