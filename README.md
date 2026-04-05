@@ -1,6 +1,6 @@
 # Auto-Evolve
 
-**LLM-powered automated skill iteration manager.**
+**Self-improvement engine for AI agents — continuously ask "can I be better?", then act.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
@@ -14,13 +14,23 @@
 
 ## Why Auto-Evolve?
 
-Most tools degrade over time. Code gets messy, documentation drifts, TODOs accumulate, tests get neglected. You know it needs fixing, but:
+**The core problem: AI agents never ask themselves "can I be better?"**
 
-- It's tedious to do manually
-- You can't prioritize what matters
-- There's no record of what changed and why
+Current AI agents:
+- Execute tasks but don't reflect on their own shortcomings
+- Make the same mistakes repeatedly
+- Never主动发现自己的可优化之处
+- Stay static after deployment
 
-**Auto-Evolve solves this.** It continuously monitors, suggests, and executes improvements — with full transparency and control.
+**Auto-Evolve is the self-improvement engine for AI agents.**
+
+It gives AI the ability to:
+- **Self-question**: "Is there anything I could do better?"
+- **Self-discover**: Find optimization opportunities in code, docs, patterns
+- **Self-improve**: Execute improvements autonomously or semi-autonomously
+- **Self-learn**: Remember what was approved/rejected and get smarter
+
+The result: AI that gets genuinely smarter over time, not just longer-lived.
 
 ---
 
