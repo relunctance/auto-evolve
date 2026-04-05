@@ -1,4 +1,4 @@
-# Auto-Evolve v3.3
+# Auto-Evolve v3.5
 
 **LLM-driven automated skill iteration manager with full audit trail.**
 
@@ -8,7 +8,7 @@
 
 ## Overview
 
-Auto-Evolve v3.3 adds **ProductThinkingScanner** -- instead of asking "is the code clean?", it asks **"还有什么不足, 有哪些地方可以优化, 使用体验如何？"** to surface product-level insights from a user perspective.
+Auto-Evolve v3.5 adds **PersonaAwareMemory** and **Master's Perspective** -- instead of asking "is the code clean?", it asks from the master's perspective: **"还有什么不足, 有哪些地方可以优化, 使用体验如何？"** to surface product-level insights.
 
 ```
 Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode Decision
@@ -39,6 +39,70 @@ Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode 
 
 ---
 
+## v3.5 New Features
+
+### 🎯 Master's Perspective Scanning
+
+Auto-Evolve v3.5 asks **from the master's perspective**:
+
+> "还有什么不足, 有哪些地方可以优化, 使用体验如何？"
+
+Every scan carries the master's context:
+- **Master's context**: reads SOUL.md, USER.md, IDENTITY.md for values/preferences
+- **Master's preferences**: recalled from OpenClaw SQLite + hawk-bridge LanceDB
+- **Learning history**: previously rejected/approved changes avoid repeated mistakes
+
+### 🧠 PersonaAwareMemory
+
+Dual memory system with graceful degradation:
+
+| Source | Priority | Description |
+|--------|---------|-------------|
+| OpenClaw SQLite | Primary | `memory/{persona}.sqlite`, structured, reliable |
+| hawk-bridge LanceDB | Supplement | Vector semantic search, persona-isolated |
+
+### 🔧 CLI Memory Controls
+
+```bash
+# Default: auto-detect persona, openclaw primary + hawkbridge supplement
+python3 scripts/auto-evolve.py scan --dry-run
+
+# Tang Sanzang recalls master's memories
+python3 scripts/auto-evolve.py scan --dry-run --recall-persona master
+
+# Force OpenClaw SQLite only
+python3 scripts/auto-evolve.py scan --dry-run --memory-source openclaw
+
+# Merge both sources
+python3 scripts/auto-evolve.py scan --dry-run --memory-source both
+```
+
+### 📊 Product Insights with why_now
+
+Product findings now include `why_now` and `suggested_direction`:
+```
+🎯 Product Evolution Insights (from 4 finding(s)):
+  1. 🚫 [STOP_DOING]
+     missing_test optimization rejected by master 3 times
+     Impact: ████████░░ 0.8
+     → Stop auto-generating test files
+     ⏱ Every generation was rejected, wasting LLM calls
+```
+
+### 🔍 Cross-File Structural Duplicate Detection
+
+Detects **structurally similar** functions across files, not just identical strings.
+Uses line-level MD5 hashing to group similar code blocks.
+
+### ⚡ Real Quality Gates
+
+Quality gates now run actual tests:
+- Python: `pytest --cov` (not just `py_compile`)
+- JavaScript/TypeScript: `jest`
+- Failure triggers automatic git revert rollback
+
+---
+
 ## Commands
 
 ### scan
@@ -48,7 +112,12 @@ Scans all configured repositories for changes and optimization opportunities.
 ```bash
 python3 auto-evolve.py scan
 python3 auto-evolve.py scan --dry-run
+python3 auto-evolve.py scan --dry-run --recall-persona master --memory-source both
 ```
+
+**v3.5 CLI Args:**
+- `--recall-persona`: Whose memory to recall (main/tseng/wukong/bajie/bailong/master, default: auto-detect)
+- `--memory-source`: Memory source (auto/openclaw/hawkbridge/both, default: auto)
 
 **v3.0: Language Detection**
 Automatically detects repository languages and uses appropriate TODO patterns.
@@ -425,3 +494,4 @@ File: `~/.auto-evolverc.json`
 - `gh` CLI (for PR creation and releases)
 - `openclaw` CLI (for cron integration and LLM config)
 - `pytest` + `coverage` (optional, for test comparison)
+- `lancedb` (optional, for hawk-bridge vector memory integration)
