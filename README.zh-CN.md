@@ -1,73 +1,97 @@
 # Auto-Evolve
 
-**AI Agent 的自我进化引擎——持续问自己"还能更好吗"，然后行动。**
+**AI Agent 自我进化引擎 — 从"主人视角"持续追问"还有什么不足, 有哪些地方可以优化, 使用体验如何？", 然后行动。**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![GitHub stars](https://img.shields.io/github/stars/relunctance/auto-evolve)](https://github.com/relunctance/auto-evolve/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://img.shields.io/badge/Python-3.10+-blue.svg)
 
-> 让你的技能越来越聪明——自动化迭代。Auto-Evolve 扫描你的代码，利用 LLM 智能生成改进建议，在有人值守或无人值守的情况下都能进化你的工具。
+> Your skills get smarter — automatically. Auto-Evolve v3.5 asks from the **master's perspective**, leverages LLM intelligence with **persona-aware memory context**, and evolves your tools with or without human oversight.
 
-**English Documentation**: [README.md](README.md)
+**English**: [README.md](README.md)
 
 ---
 
-## 为什么需要 Auto-Evolve？
+## 核心转变
 
-**核心问题：AI Agent 从不主动问自己"我还能更好吗？"
+**旧版本问：** "这段代码有重复吗？这个函数超过100行了吗？"
+**v3.5 问：** "还有什么不足, 有哪些地方可以优化, 使用体验如何？"
 
-当前的 AI Agent：
-- 执行任务，但不反思自己的不足
-- 反复犯同样的错误
-- 从不主动发现自己的可优化之处
-- 部署后就停滞不前
-
-**Auto-Evolve 是 AI Agent 的自我进化引擎。**
-
-它赋予 AI 能力：
-- **自我追问**：还有什么可以优化？
-- **自我发现**：主动找到代码、文档、模式中的优化机会
-- **自我改进**：自主或半自主地执行改进
-- **自我学习**：记住什么被批准、什么被拒绝，越变越聪明
-
-结果是：AI 真正越来越聪明，而不只是活得越久。
+这不是代码质量扫描器——这是**从主人视角出发的持续改进伙伴**。
 
 ---
 
 ## 核心功能
 
-### 🔍 智能扫描
-- 检测 TODO/FIXME/HACK/XXX 注释
-- 查找重复代码模式
-- 识别过长函数
-- 检查测试覆盖率
-- **LLM 驱动分析**，理解上下文，给出真正有价值的建议
+### 🎯 从主人视角追问
 
-### 🎯 智能优先级
-- 计算优先级分：`P = (价值 × 0.5) / (风险 × 成本)`
-- 改动前显示依赖影响
-- 按收益/努力比排序建议
+每次巡检，Auto-Evolve 都会带着以下上下文来问问题：
 
-### ⚡ 两种运行模式
-- **半自动**：扫描、建议、等待确认
-- **全自动**：按规则自动执行低风险改动
+- **主人背景**：从 `SOUL.md`、`USER.md`、`IDENTITY.md` 读取主人的价值观、偏好、项目定位
+- **主人偏好**：从 OpenClaw SQLite 记忆 + hawk-bridge LanceDB 召回主人曾经表达过的好恶
+- **历史学习**：从 `learnings/` 读取之前拒绝/批准过的改动，避免重复踩坑
 
-### 🔒 完整审计跟踪
-- 每次迭代都有记录
-- 前后指标对比
-- 可回滚到任意历史状态
-- 学习你的批准和拒绝习惯
+```
+"还有什么不足, 有哪些地方可以优化, 使用体验如何？"
 
-### 🌐 分支 + PR 工作流
-- 高风险改动走独立分支
-- GitHub PR 附带完整上下文
-- 尽可能自动解决冲突
-- 相似小改动合并为一个 PR
+主人背景：主人追求自动化，喜欢简洁直接...
+主人偏好：主人不喜欢生成 test 文件...
+学习历史：主人拒绝了 3 次 missing_test 类型的改动...
+```
 
-### 📊 效果追踪
-- 测量：已解决 TODO、已修复 lint 错误、覆盖率变化
-- 对比历次迭代的指标
-- 追踪自动 vs 人工贡献比例
+### 🧠 Persona 感知记忆系统
+
+| 记忆源 | 优先级 | 说明 |
+|--------|--------|------|
+| OpenClaw SQLite | 优先 | `memory/{persona}.sqlite`，结构化，可信 |
+| hawk-bridge LanceDB | 补充 | 向量语义搜索，按 persona 隔离 |
+
+```bash
+# 默认：以当前 agent persona 巡检
+python3 scripts/auto-evolve.py scan --dry-run
+
+# 唐僧召回主人的全部记忆
+python3 scripts/auto-evolve.py scan --dry-run --recall-persona master
+
+# 只用 OpenClaw SQLite
+python3 scripts/auto-evolve.py scan --dry-run --memory-source openclaw
+
+# 两个都读，合并结果
+python3 scripts/auto-evolve.py scan --dry-run --memory-source both
+```
+
+### 📊 真正的产品洞察（而非代码问题列表）
+
+输出示例：
+```
+🎯 Product Evolution Insights (from 4 finding(s)):
+
+  1. 🚫 [STOP_DOING]
+     missing_test 优化被主人拒绝了 3 次
+     Impact: ████████░░ 0.8
+     → 停止自动生成 test 文件
+     ⏱ 每次生成都被拒，白白浪费 LLM 调用
+     File: auto-evolve config
+
+  2. 😤 [USER_COMPLAINT]
+     这个功能使用起来太麻烦了，主人得手动做3步
+     Impact: █████░░░░░ 0.5
+     → 把这个流程自动化
+     File: soul-force/scripts/soulforge.py
+```
+
+### ⚡ 真实质量门槛
+
+不只是 `py_compile` 语法检查：
+- Python：`pytest --cov` 实际运行测试
+- JavaScript/TypeScript：`jest` 实际运行测试
+- 失败则自动回滚
+
+### 🔍 跨文件结构重复检测
+
+不只是检测完全相同的字符串——检测**结构相似**的函数：
+- 不同文件中相似的函数签名
+- 重复的 if/else 块、try/catch 块
+- 用 LLM 分析消除重复的具体方案
 
 ---
 
@@ -75,233 +99,131 @@
 
 ### 安装
 
-**方式一：通过 ClawHub（推荐）**
 ```bash
-# 全局安装，所有 Agent 可用
+# Via ClawHub（推荐）
 clawhub install auto-evolve
 
-# 或安装到指定目录
-clawhub install auto-evolve --dir ~/.openclaw/workspace/skills
+# Via Git
+git clone https://github.com/relunctance/auto-evolve.git \
+  ~/.openclaw/workspace/skills/auto-evolve
 ```
 
-**方式二：通过 Git 克隆**
-```bash
-# 克隆仓库
-git clone https://github.com/relunctance/auto-evolve.git ~/.openclaw/workspace/skills/auto-evolve
+### 配置
 
-# 进入目录
-cd ~/.openclaw/workspace/skills/auto-evolve
+```bash
+# 添加要巡检的仓库
+python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force \
+  --type skill --monitor
+
+# 设置为全自动化模式
+python3 scripts/auto-evolve.py set-mode full-auto
+
+# 每 10 分钟巡检一次
+python3 scripts/auto-evolve.py schedule --every 10
 ```
 
-**方式三：通过 GitHub releases 下载**
-```bash
-# 访问以下地址下载最新版本
-# https://github.com/relunctance/auto-evolve/releases
-```
-
-### 安装后配置
+### 运行
 
 ```bash
-# 添加要监控的仓库
-python3 scripts/auto-evolve.py repo-add /path/to/your/project --type skill --monitor
-
-# 设置运行模式
-python3 scripts/auto-evolve.py set-mode full-auto  # 全自动模式
-python3 scripts/auto-evolve.py set-mode semi-auto  # 半自动模式（确认后执行）
-
-# 设置自动执行规则（全自动模式）
-python3 scripts/auto-evolve.py set-rules --low true --medium true
-
-# 设置定时扫描
-python3 scripts/auto-evolve.py schedule --every 60   # 每 60 分钟
-python3 scripts/auto-evolve.py schedule --every 720  # 每 12 小时
-```
-
-### 基本使用
-
-```bash
-# 扫描所有已配置的仓库
-python3 scripts/auto-evolve.py scan
-
-# 预览（不执行）
+# 巡检 + 预览（不执行）
 python3 scripts/auto-evolve.py scan --dry-run
 
-# 半自动模式：确认并执行待处理变更
-python3 scripts/auto-evolve.py confirm
+# 巡检 + 执行（full-auto 模式下）
+python3 scripts/auto-evolve.py scan
 
-# 查看迭代历史
-python3 scripts/auto-evolve.py log
-
-# 回滚到某个版本
-python3 scripts/auto-evolve.py rollback --to VERSION
+# 以主人视角召回记忆巡检
+python3 scripts/auto-evolve.py scan --dry-run \
+  --recall-persona master --memory-source both
 ```
-
----
-
-## 配置
-
-Auto-Evolve 使用 `~/.auto-evolverc.json` 配置文件：
-
-```json
-{
-  "mode": "semi-auto",
-  "repositories": [
-    {
-      "path": "~/.openclaw/workspace/skills/soul-force",
-      "type": "skill",
-      "visibility": "public",
-      "auto_monitor": true
-    },
-    {
-      "path": "~/projects/closed-project",
-      "type": "project",
-      "visibility": "closed",
-      "auto_monitor": true,
-      "risk_override": {
-        "code_changes": "medium"
-      }
-    }
-  ],
-  "full_auto_rules": {
-    "execute_low_risk": true,
-    "execute_medium_risk": false,
-    "execute_high_risk": false
-  },
-  "schedule_interval_hours": 168
-}
-```
-
-### 添加仓库
-
-```bash
-# 添加技能仓库
-python3 scripts/auto-evolve.py repo-add ~/my-skill --type skill --monitor
-
-# 添加规范仓库
-python3 scripts/auto-evolve.py repo-add ~/team-norms --type norms --monitor
-
-# 列出已配置的仓库
-python3 scripts/auto-evolve.py repo-list
-```
-
----
-
-## 仓库类型
-
-| 类型 | 说明 | 默认风险 |
-|------|------|---------|
-| `skill` | OpenClaw 技能 | 低 |
-| `norms` | 团队规范仓库 | 低 |
-| `project` | 开源项目 | 中 |
-| `closed` | 私有/闭源项目 | 中 |
 
 ---
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Auto-Evolve                           │
-├─────────────────────────────────────────────────────────┤
-│  ┌──────────┐   ┌──────────┐   ┌──────────────────┐   │
-│  │  Scanner │──▶│ Analyzer │──▶│  Prioritizer     │   │
-│  │  (git + │   │ (LLM +   │   │  (P = v/r×c)    │   │
-│  │   regex)│   │ patterns)│   │                   │   │
-│  └──────────┘   └──────────┘   └──────────────────┘   │
-│         │              │                  │              │
-│         ▼              ▼                  ▼              │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │              Executor                            │    │
-│  │  ┌────────────┐  ┌────────────┐  ┌──────────┐ │    │
-│  │  │ Low Risk  │  │ Medium/   │  │ High Risk│ │    │
-│  │  │ (direct)  │  │ High      │  │ (PR)    │ │    │
-│  │  └────────────┘  └────────────┘  └──────────┘ │    │
-│  └─────────────────────────────────────────────────┘    │
-│                          │                              │
-│                          ▼                              │
-│  ┌─────────────────────────────────────────────────┐  │
-│  │              Audit Trail                          │  │
-│  │   catalog.json │ manifest.json │ metrics.json       │  │
-│  └─────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+巡检触发
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│  Step 1: 检测当前 persona                  │
+│  detect_persona() → main/tseng/wukong/...   │
+└────────────────────┬──────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────┐
+│  Step 2: 确定 workspace 路径                │
+│  main → ~/.openclaw/workspace/            │
+│  tseng → ~/.openclaw/workspace-tseng/     │
+└────────────────────┬──────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────┐
+│  Step 3: 读取主人上下文                   │
+│  SOUL.md / USER.md / IDENTITY.md / MEMORY │
+└────────────────────┬──────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────┐
+│  Step 4: 召回记忆（按 persona）            │
+│  OpenClaw SQLite (primary)                │
+│  + hawk-bridge LanceDB (supplement)      │
+└────────────────────┬──────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────┐
+│  Step 5: LLM 产品级分析                   │
+│  "还有什么不足, 有哪些地方可以优化,        │
+│   使用体验如何？"                          │
+└─────────────────────────────────────────────┘
 ```
 
 ---
 
-## 命令参考
+## 命令
 
 | 命令 | 说明 |
 |------|------|
-| `scan` | 扫描并分析仓库 |
+| `scan` | 巡检（加 `--dry-run` 预览） |
+| `scan --recall-persona master` | 以主人记忆巡检 |
+| `scan --memory-source openclaw` | 指定记忆源 |
 | `confirm` | 确认并执行待处理变更 |
-| `approve` | 批准特定变更（支持 `--reason`） |
-| `reject` | 拒绝变更并记录原因 |
-| `set-mode` | 切换半自动 / 全自动模式 |
-| `set-rules` | 配置全自动执行规则 |
-| `schedule` | 设置定期扫描 |
-| `learnings` | 查看批准/拒绝历史 |
-| `rollback` | 回滚到历史迭代 |
-| `repo-add` | 添加要监控的仓库 |
-| `repo-list` | 列出所有仓库 |
-| `release` | 创建 GitHub Release（v3+） |
-
-完整命令参考：[SKILL.md](SKILL.md)
+| `approve / reject` | 批准/拒绝变更并记录原因 |
+| `set-mode full-auto` | 全自动化模式 |
+| `set-rules --low true` | 设置自动执行规则 |
+| `schedule --every 60` | 设置巡检周期 |
+| `learnings` | 查看学习历史 |
+| `rollback` | 回滚到上一版本 |
+| `repo-add / repo-list` | 管理巡检仓库 |
 
 ---
 
-## 隐私与安全
+## CLI 参数
 
-### 隐私级别
-
-标记为 `visibility: "closed"` 的仓库享有特殊处理：
-- 报告中代码内容脱敏
-- 文件路径替换为内容哈希
-- 通知中不包含原始代码
-
-### 质量门槛
-
-每个自动执行的变更必须通过：
-1. **语法检查** — Python 文件必须能编译
-2. **Git 状态** — 无未跟踪的敏感文件
-3. **文档同步** — 需要时更新 SKILL.md
-
-### 回滚
-
-每次迭代都有记录。回滚只需一条命令：
-
-```bash
-auto-evolve rollback --to v2.2.0
-# 或 cherry-pick 单个变更
-auto-evolve rollback --to v2.2.0 --item 3
 ```
+scan:
+  --dry-run              预览，不执行
+  --recall-persona       召回谁的记忆（main/tseng/wukong/bajie/bailong/master）
+  --memory-source        记忆源（auto/openclaw/hawkbridge/both）
+```
+
+---
+
+## 安全机制
+
+- **语法门槛**：Python `py_compile` + pytest；JS/TS jest
+- **回滚**：每次执行后记录 git revert，一键回滚
+- **Privacy**：closed 仓库代码不外泄
+- **Learnings 过滤**：learnings 中被拒绝的改动不再重复尝试
 
 ---
 
 ## 相关项目
 
-- [SoulForce](https://github.com/relunctance/soul-force) — AI 智能体记忆进化系统
+- [SoulForce](https://github.com/relunctance/soul-force) — AI Agent 记忆进化系统
 - [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw 上下文记忆集成
 
 ---
 
-## 贡献指南
+## License
 
-贡献是受欢迎的！请在提交 PR 前阅读我们的指南。
-
-1. Fork 本仓库
-2. 创建功能分支：`git checkout -b feature/amazing-feature`
-3. 提交更改并附上清晰信息
-4. 推送到分支：`git push origin feature/amazing-feature`
-5. 发起 Pull Request
-
----
-
-## 许可证
-
-MIT 许可证 — 参见 [LICENSE](LICENSE)
-
----
-
-## English Version
-
-For English documentation, see [README.md](README.md)
+MIT
