@@ -1,4 +1,4 @@
-# Auto-Evolve v3.1
+# Auto-Evolve v3.3
 
 **LLM-driven automated skill iteration manager with full audit trail.**
 
@@ -8,7 +8,7 @@
 
 ## Overview
 
-Auto-Evolve v3.1 adds effect tracking, LLM cost tracking, GitHub issue auto-closing, and smart activity-based scheduling.
+Auto-Evolve v3.3 adds **ProductThinkingScanner** -- instead of asking "is the code clean?", it asks **"还有什么不足, 有哪些地方可以优化, 使用体验如何？"** to surface product-level insights from a user perspective.
 
 ```
 Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode Decision
