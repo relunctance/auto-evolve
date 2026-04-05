@@ -3772,12 +3772,14 @@ class FourPerspectiveScanner:
         pr_number = os.environ.get("PR_NUMBER", "")
         issue_number = os.environ.get("ISSUE_NUMBER", "")
 
-        # v4.3: Always create an issue, post comment on PR if applicable
-        # Close old auto-evolve issues if findings are resolved
-        self._check_and_close_old_issues(token, owner, repo, findings)
-
-        # Always create new issue with scan results
-        ok = self._create_issue(token, owner, repo, body)
+        # v4.4: Check for existing auto-evolve issue, update it instead of creating new
+        existing_issue = self._find_auto_evolve_issue(token, owner, repo)
+        if existing_issue:
+            self._update_issue(token, owner, repo, existing_issue["number"], body)
+            print(f"[GitHub] Updated existing issue #{existing_issue['number']}")
+            ok = True
+        else:
+            ok = self._create_issue(token, owner, repo, body)
         # Also post PR comment if this is from a PR
         if pr_number:
             self._post_pr_comment(token, owner, repo, pr_number, body)
@@ -3965,14 +3967,12 @@ class FourPerspectiveScanner:
             print(f"[GitHub] Failed to post issue comment: {e}")
         return False
 
-    def _check_and_close_old_issues(self, token: str, owner: str, repo: str,
-                                    current_findings: list["PerspectiveFinding"]) -> None:
-        """Close auto-evolve issues that are no longer appearing in scans (resolved)."""
+    def _find_auto_evolve_issue(self, token: str, owner: str, repo: str) -> dict | None:
+        """Find the most recent open auto-evolve issue for this repo. v4.4."""
         import urllib.request, json
 
-        # Get all open auto-evolve issues
         url = f"https://api.github.com/repos/{owner}/{repo}/issues"
-        url += "?state=open&labels=auto-evolve&per_page=50"
+        url += "?state=open&labels=auto-evolve&per_page=10&sort=created&direction=desc"
         req = urllib.request.Request(url)
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("Accept", "application/vnd.github+json")
@@ -3980,55 +3980,31 @@ class FourPerspectiveScanner:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 issues = json.loads(resp.read())
+                for issue in issues:
+                    if "Auto-Evolve Scan" in issue.get("title", ""):
+                        return issue
         except Exception:
-            return
+            pass
+        return None
 
-        # Build set of current finding descriptions (strip [NEW] prefix)
-        current_descs = {f.description.replace("[NEW] ", "").strip() for f in current_findings}
+    def _update_issue(self, token: str, owner: str, repo: str,
+                       issue_number: int, body: str) -> bool:
+        """Update an existing GitHub issue with new scan results. v4.4."""
+        import urllib.request, json
 
-        for issue in issues:
-            issue_title = issue.get("title", "")
-            # Only close auto-evolve scan issues (titled like "🔍 Auto-Evolve Scan")
-            if "Auto-Evolve Scan" not in issue_title:
-                continue
-            issue_number = issue.get("number")
-            body = issue.get("body", "")
-
-            # Extract finding descriptions from previous issue body
-            prev_descs = set()
-            for line in body.split("\n"):
-                if line.strip().startswith(("🆕", "  ", "- **")):
-                    # Extract description text
-                    for part in line.split("\n"):
-                        part = part.strip()
-                        if part.startswith(("🆕", "  ")):
-                            # Remove emoji and parse
-                            part = part.lstrip("🆕 ").strip()
-                            if part.startswith("**"):
-                                parts = part.split("**")
-                                if len(parts) >= 2:
-                                    prev_descs.add(parts[1].strip())
-
-            # Close issue if all findings resolved (no longer in current scan)
-            # Only close if issue body has findings that are ALL resolved now
-            if prev_descs and prev_descs <= current_descs:
-                # Some old findings still present - don't close
-                pass
-            elif prev_descs and not (prev_descs & current_descs):
-                # ALL old findings resolved - close the issue
-                close_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
-                close_req = urllib.request.Request(
-                    close_url, data=json.dumps({"state": "closed"}).encode(), method="PATCH"
-                )
-                close_req.add_header("Authorization", f"Bearer {token}")
-                close_req.add_header("Accept", "application/vnd.github+json")
-                close_req.add_header("X-GitHub-Api-Version", "2022-11-28")
-                try:
-                    with urllib.request.urlopen(close_req, timeout=15) as r:
-                        if r.status in (200, 201):
-                            print(f"[GitHub] Closed resolved issue #{issue_number}")
-                except Exception as e:
-                    print(f"[GitHub] Failed to close issue #{issue_number}: {e}")
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
+        data = json.dumps({"body": body}).encode()
+        req = urllib.request.Request(url, data=data, method="PATCH")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "auto-evolve/4.4")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status in (200, 201)
+        except Exception as e:
+            print(f"[GitHub] Failed to update issue #{issue_number}: {e}")
+            return False
 
     def scan(self) -> list[PerspectiveFinding]:
         """

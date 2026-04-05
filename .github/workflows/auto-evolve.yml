@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Repository path to scan (default: current repo)'
+        description: 'Relative path to repository to scan (e.g., ../other-repo)'
         required: false
         default: ''
 
@@ -20,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: main-repo
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,18 +32,23 @@ jobs:
         run: |
           pip install openai requests
 
+      - name: Determine target repo
+        id: target
+        run: |
+          if [ -n "${{ inputs.target_repo }}" ]; then
+            TARGET="${{ github.workspace }}/${{ inputs.target_repo }}"
+            echo "path=$TARGET" >> $GITHUB_OUTPUT
+          else
+            echo "path=${{ github.workspace }}/main-repo" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run Auto-Evolve scan
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.number }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GITHUB_REPO_PATH: ${{ github.workspace }}/${{ inputs.target_repo }}
         run: |
-          if [ -n "${{ inputs.target_repo }}" ]; then
-            TARGET="${{ github.workspace }}/${{ inputs.target_repo }}"
-          else
-            TARGET="${{ github.workspace }}"
-          fi
+          TARGET=$(cat $GITHUB_OUTPUT | grep path | cut -d= -f2)
           python3 scripts/auto-evolve.py scan --repo "$TARGET" --github-event ${{ github.event_name }}
 
       - name: Scan summary
