@@ -8,44 +8,137 @@ from .core import *
 
 # ---- Learnings -----------------------------------------------------------
 
-LEARNINGS_DIR = Path.home() / ".openclaw" / "workspace" / "skills" / "auto-evolve" / ".learnings"
+# Per-persona learnings directory (not inside skill folder)
+LEARNINGS_DIR = Path.home() / ".openclaw" / "workspace" / ".learnings"
 
 
-def ensure_learnings_dir() -> Path:
-    """Ensure .learnings directory exists."""
-    LEARNINGS_DIR.mkdir(parents=True, exist_ok=True)
-    return LEARNINGS_DIR
+def ensure_learnings_dir(persona: str = "") -> Path:
+    """Ensure per-persona .learnings directory exists."""
+    d = get_learnings_dir(persona)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
-def load_learnings() -> dict:
-    """Load learnings from .learnings/approvals.json and .learnings/rejections.json."""
-    ensure_learnings_dir()
-    approvals = []
-    rejections = []
+def load_learnings(persona: str = "") -> dict:
+    """Load learnings from per-persona .learnings directory."""
+    d = ensure_learnings_dir(persona)
+    approvals, rejections = [], []
     try:
-        with open(ensure_learnings_dir() / "approvals.json", "r") as f:
+        with open(d / "approvals.json", "r") as f:
             approvals = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     try:
-        with open(ensure_learnings_dir() / "rejections.json", "r") as f:
+        with open(d / "rejections.json", "r") as f:
             rejections = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     return {"approvals": approvals, "rejections": rejections}
 
 
-def save_learnings(data: dict) -> None:
-    """Save learnings to .learnings/."""
-    ensure_learnings_dir()
+def save_learnings(data: dict, persona: str = "") -> None:
+    """Save learnings to per-persona .learnings directory."""
+    d = ensure_learnings_dir(persona)
     for key in ("approvals", "rejections"):
-        fp = ensure_learnings_dir() / f"{key}.json"
+        fp = d / f"{key}.json"
         with open(fp, "w") as f:
             json.dump(data.get(key, []), f, ensure_ascii=False, indent=2)
 
 
+def record_learning(
+    item: dict,
+    result: str,
+    repo: str,
+) -> None:
+    """
+    Record an execution result to learnings.
+    - result == "ok" → approvals.json
+    - result != "ok" → rejections.json (includes reason)
+    
+    Args:
+        item: Change item dict with keys: description, type, file_path
+        result: "ok" for success, or error reason string for failure
+        repo: repository path
+    """
+    from datetime import datetime
+    
+    learning = {
+        "timestamp": datetime.now().isoformat(),
+        "description": item.get("description", ""),
+        "type": item.get("type", ""),
+        "result": result,
+        "file_path": item.get("file_path", ""),
+        "repo": repo,
+    }
+    
+    ensure_learnings_dir()
+    
+    approvals, rejections = [], []
+    try:
+        with open(LEARNINGS_DIR / "approvals.json") as f:
+            approvals = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    try:
+        with open(LEARNINGS_DIR / "rejections.json") as f:
+            rejections = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    
+    if result == "ok":
+        approvals.append(learning)
+    else:
+        learning["reason"] = result
+        rejections.append(learning)
+    
+    with open(LEARNINGS_DIR / "approvals.json", "w") as f:
+        json.dump(approvals, f, ensure_ascii=False, indent=2)
+    with open(LEARNINGS_DIR / "rejections.json", "w") as f:
+        json.dump(rejections, f, ensure_ascii=False, indent=2)
+
+
+def record_iteration_metrics(
+    iteration_id: str,
+    todo_count: int = 0,
+    todo_resolved: int = 0,
+    duplicate_count: int = 0,
+    duplicate_resolved: int = 0,
+    auto_executed: int = 0,
+    approved: int = 0,
+    rejected: int = 0,
+    llm_cost_usd: float = 0.0,
+) -> dict:
+    """
+    Record iteration metrics for trend tracking.
+    
+    Saves metrics to .learnings/metrics/{iteration_id}.json
+    """
+    from datetime import datetime
+    
+    metrics = {
+        "iteration_id": iteration_id,
+        "timestamp": datetime.now().isoformat(),
+        "todo_count": todo_count,
+        "todo_resolved": todo_resolved,
+        "duplicate_count": duplicate_count,
+        "duplicate_resolved": duplicate_resolved,
+        "auto_executed": auto_executed,
+        "approved": approved,
+        "rejected": rejected,
+        "llm_cost_usd": llm_cost_usd,
+    }
+    
+    metrics_dir = LEARNINGS_DIR / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    
+    with open(metrics_dir / f"{iteration_id}.json", "w") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    
+    return metrics
+
+
 def is_rejected(change_desc: str, repo: str, learnings: dict) -> bool:
-    """Check if a change was previously rejected."""
+    """Check if a change was previously rejected in learnings."""
     for r in learnings.get("rejections", []):
         if r.get("repo") == repo and r.get("description", "") == change_desc:
             return True

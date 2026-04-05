@@ -196,7 +196,7 @@ class ProductThinkingScanner:
 
     def _analyze_learnings_patterns(self, repo: Repository) -> list[ProductThinkingFinding]:
         findings: list[ProductThinkingFinding] = []
-        learnings = load_learnings()
+        learnings = load_learnings(persona=self.effective_persona)
         rejections = learnings.get("rejections", [])
         approvals = learnings.get("approvals", [])
         if not rejections:
