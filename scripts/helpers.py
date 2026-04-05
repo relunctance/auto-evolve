@@ -82,26 +82,34 @@ def record_learning(
     Record an execution result to learnings.
     - result == "ok" → approvals.json
     - result != "ok" → rejections.json (includes reason)
-    
+
+    Enhanced v4.0: saves richer context including perspective, scenario, impact.
+
     Args:
-        item: Change item dict with keys: description, type, file_path
+        item: Change item dict with keys: description, type, file_path,
+              perspective, risk, scenario, suggested_direction, impact_score
         result: "ok" for success, or error reason string for failure
         repo: repository path
     """
     from datetime import datetime
-    
+
     learning = {
         "timestamp": datetime.now().isoformat(),
         "description": item.get("description", ""),
         "type": item.get("type", ""),
+        "perspective": item.get("perspective", ""),
+        "risk": item.get("risk", ""),
+        "scenario": item.get("scenario", ""),
+        "suggested_direction": item.get("suggested_direction", ""),
+        "impact_score": float(item.get("impact_score", 0.5)),
         "result": result,
         "file_path": item.get("file_path", ""),
         "repo": repo,
     }
-    
+
     persona = _detect_persona()
     d = ensure_learnings_dir(persona)
-    
+
     approvals, rejections = [], []
     try:
         with open(d / "approvals.json") as f:
@@ -113,13 +121,13 @@ def record_learning(
             rejections = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
-    
+
     if result == "ok":
         approvals.append(learning)
     else:
         learning["reason"] = result
         rejections.append(learning)
-    
+
     with open(d / "approvals.json", "w") as f:
         json.dump(approvals, f, ensure_ascii=False, indent=2)
     with open(d / "rejections.json", "w") as f:

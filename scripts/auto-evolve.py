@@ -3455,9 +3455,11 @@ class FourPerspectiveScanner:
             return ("通用项目", "用户 25% / 产品 25% / 项目 25% / 技术 25%")
 
     def _load_learnings_context(self) -> str:
-        """Build a context string from learnings history, using current persona's workspace."""
+        """Build a context string from learnings history, using current persona's workspace.
+
+        v4.0: richer format includes perspective, scenario, and pattern analysis.
+        """
         try:
-            # Use the persona-aware workspace for learnings
             learnings_dir = self.memory.workspace / ".learnings"
             approvals_file = learnings_dir / "approvals.json"
             rejections_file = learnings_dir / "rejections.json"
@@ -3475,16 +3477,38 @@ class FourPerspectiveScanner:
                     pass
             if not approvals and not rejections:
                 return f"No learnings history yet for {self.effective_persona}."
+
             p = self.effective_persona
-            parts = [f"【{p} 学习历史 / Learnings History】"]
+            parts = [f"【{p} 学习历史 / Learnings History v4.0】"]
+
+            # Pattern analysis: count rejection reasons
             if rejections:
+                reason_count: dict[str, int] = {}
+                for r in rejections:
+                    reason = r.get("reason", "no reason")[:60]
+                    reason_count[reason] = reason_count.get(reason, 0) + 1
+
                 parts.append(f"\n{p} 之前拒绝过的改动（共 {len(rejections)} 次）:")
-                for r in rejections[-5:]:
-                    parts.append(f"  - 拒绝: {r.get('description', '')[:80]} | 原因: {r.get('reason', '未说明')[:60]}")
+                # Show pattern first (why rejections happen)
+                if len(reason_count) > 0:
+                    top_reasons = sorted(reason_count.items(), key=lambda x: -x[1])[:3]
+                    parts.append("  常见拒绝原因（TOP3）:")
+                    for reason, count in top_reasons:
+                        parts.append(f"    - [{count}x] {reason}")
+                # Recent rejections
+                for r in rejections[-3:]:
+                    scenario = r.get("scenario", "")
+                    persp = r.get("perspective", "")
+                    desc = r.get("description", "")[:70]
+                    reason = r.get("reason", "")[:50]
+                    parts.append(f"  - 拒绝[{persp}]: {desc} | 因: {reason} | 场景: {scenario or '(未记录)'}")
             if approvals:
                 parts.append(f"\n{p} 之前批准过的改动（共 {len(approvals)} 次）:")
                 for a in approvals[-5:]:
-                    parts.append(f"  - 批准: {a.get('description', '')[:80]}")
+                    persp = a.get("perspective", "")
+                    desc = a.get("description", "")[:80]
+                    direction = a.get("suggested_direction", "")[:50]
+                    parts.append(f"  - 批准[{persp}]: {desc} | 方向: {direction or '(未记录)'}")
             return "\n".join(parts)
         except Exception:
             return f"No learnings history yet for {self.effective_persona}."
@@ -3720,11 +3744,18 @@ class FourPerspectiveScanner:
         """
         ⚙️ 技术视角: Is the code healthy?
         Uses project-standard's code-standards.md as evaluation criteria.
-        Delegates to the existing optimization scanner for code-level findings.
+
+        v4.0: LLM-driven scan + project-type-aware checks (security + performance).
         """
+        config = get_openclaw_llm_config()
+        repo_path = repo.resolve_path()
+
+        # Load project-standard TECH reference doc
+        ref_doc = self._project_standard_docs.get("TECH", "")
+
+        # 1. Run existing optimization scanner (TODO/FIXME/duplicates)
         findings = scan_optimizations(repo)
-        # Convert OptimizationFinding → PerspectiveFinding(TECH)
-        risk_to_impact = {"low": 0.3, "medium": 0.5, "high": 0.7}
+        risk_to_impact = {"low": 0.3, "medium": 0.5, "high": 0.7, "critical": 0.9}
         result: list[PerspectiveFinding] = []
         for f in findings:
             result.append(PerspectiveFinding(
@@ -3738,7 +3769,74 @@ class FourPerspectiveScanner:
                 risk=f.risk,
                 why_now="技术债务积累",
             ))
+
+        # 2. LLM-driven security + performance scan (v4.0 enhancement)
+        if config.get("api_key") and config.get("base_url"):
+            tech_findings = self._scan_tech_llm(repo, project_type, ref_doc)
+            result.extend(tech_findings)
+
         return result
+
+    def _scan_tech_llm(self, repo: Repository, project_type: str,
+                        ref_doc: str) -> list[PerspectiveFinding]:
+        """LLM-driven security and performance checks, tailored by project_type."""
+        config = get_openclaw_llm_config()
+        repo_path = repo.resolve_path()
+        context = self._gather_context(repo)
+
+        tech_focus_map = {
+            "前端应用": "前端性能(首屏/加载优化)、XSS/CSRF、依赖安全",
+            "后端服务": "API安全(注入/鉴权)、N+1查询、内存泄漏",
+            "智能体/AI": "Prompt注入、数据泄露、模型信息暴露、API Key硬编码",
+            "基础设施": "资源泄漏、OTA安全、内存溢出、错误处理缺失",
+            "内容与文档": "静态资源安全、链接有效性、构建产物安全",
+        }
+        tech_focus = tech_focus_map.get(project_type, "通用代码质量、安全漏洞、性能问题")
+
+        prompt_parts = [
+            "你收到了这条消息：",
+            f"你觉得 {repo_path.name} 这个项目在技术层面有什么问题？",
+            "",
+            f"[项目类型] {project_type}，技术检查重点：{tech_focus}",
+            f"[你的身份] {self.effective_persona}",
+            f"[上下文] {self.master_summary[:400]}",
+            "",
+            "[评判标准 - 技术视角]",
+            "参考 project-standard 的技术标准：",
+            ref_doc[:2500] if ref_doc else "(无可用标准，使用内置检查项)",
+            "",
+            "重点检查（根据项目类型）：",
+            "  " + tech_focus,
+            "",
+            "通用检查项：",
+            "  1. 安全漏洞：硬编码密码/Token/Secret、SQL/NoSQL注入风险、XSS",
+            "  2. 性能问题：N+1查询，大循环，内存泄漏，同步阻塞",
+            "  3. 代码质量：重复代码，长函数(>100行)，硬编码magic number",
+            "  4. 异常处理：裸except，吞掉异常，错误传播缺失",
+            "",
+            "返回 JSON 数组，每个元素：",
+            "  insight: (string, 中文) 发现了什么技术问题",
+            "  category: (string) security | performance | code_quality | error_handling",
+            "  impact: (float 0.0-1.0) 对系统稳定性/安全的影响",
+            "  evidence: (array) 支持观点的代码片段（1-2条，每条<100字）",
+            "  suggested_fix: (string, 中文) 具体修复建议",
+            "  why_now: (string, 中文) 为什么现在重要",
+            "  repo_path: (string) 相关文件",
+            "",
+            "如果没有发现任何技术问题，返回空数组 []。",
+            "Context: " + context[:5000],
+        ]
+        prompt = "\n".join(prompt_parts)
+
+        result_raw = call_llm(
+            prompt=prompt,
+            system="你是一个资深技术评审专家，专注于代码安全、性能和架构质量。回复中文。",
+            model=config["model"],
+            base_url=config["base_url"],
+            api_key=config["api_key"],
+        )
+        return self._parse_llm_findings(result_raw, "TECH")
+
 
     def _gather_context(self, repo: Repository) -> str:
         """Gather all available context for holistic analysis."""
