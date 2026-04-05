@@ -2,6 +2,51 @@
 
 All notable changes to auto-evolve are documented here.
 
+## [3.0.0] — 2026-04-05
+
+### New Features
+
+- **LLM-driven code analysis:** `get_openclaw_llm_config()` reads OpenClaw's LLM config (env vars or `openclaw config get llm`). `analyze_with_llm()` sends top 5 pending items to LLM for optimization suggestions, risk re-assessment, and implementation hints. `run_llm_analysis_on_changes()` orchestrates LLM calls and updates change priority. Results stored in `pending-review.json` (llm_suggestion, llm_implementation_hint fields). No separate API key required.
+
+- **Dependency awareness:** `analyze_dependencies()` scans import/require statements across Python, JavaScript, TypeScript, Go, and Java files. Builds a dependency map via `build_dependency_map()`. `find_dependents()` returns files that import a given module. Shown in scan output as `⚠️ Dependency Alert:` with list of affected files. Also shown in approve prompt as `⚠️Ndeps` badge.
+
+- **Test comparison:** `run_test_comparison()` runs pytest at two git refs (before_hash and after_hash) and compares coverage. `run_tests_for_hash()` checks out a ref, runs pytest with coverage, returns passed/coverage/duration. Results stored in `metrics.json` as `test_coverage_delta`. Requires pytest and coverage plugin.
+
+- **Cherry-pick rollback:** `rollback --to VERSION --item ID` reverts only the specific commit matching item ID instead of full iteration revert. Implemented in `cmd_rollback()` with `item_id` argument. Shows `(cherry-pick: only item #N)` in output.
+
+- **Multi-language support:** `TODO_PATTERNS` dict now covers `.py`, `.js`, `.ts`, `.go`, `.sh`, `.java`, `.md`. `LANGUAGE_EXTENSIONS` maps extensions to language names. `detect_language_from_path()`, `detect_repo_languages()`, `get_todo_patterns_for_file()` added. `scan_todos_multilang()` scans all supported file types with correct patterns. `_scan_code_file()` detects long functions in JS/TS/Go. Language detection shown in repo-list and scan output.
+
+- **Release management:** `cmd_release()` / `release` command creates git tag + GitHub release. `create_release()` creates `v{version}` tag, pushes to origin, and calls `gh release create` with auto-generated release notes. Usage: `auto-evolve.py release --version 2.3.0 [--changelog "..."]`.
+
+- **Contributor tracking:** `track_contributors()` parses git log, distinguishes `auto:` / `auto-evolve:` commits from manual commits. Returns total/auto/manual counts, auto percentage, last manual date. Shown in scan output and `log` command as `👥 {auto}A/{manual}M ({pct}% auto)`. Stored in iteration manifest under `contributors` field.
+
+### Changed
+
+- **Scan output:** Shows detected languages per repository. Shows `⚠️Ndeps` badge for items with dependency effects. Shows `🤖` badge for LLM-analyzed items.
+- **Approve prompt:** Shows dependency count (`⚠️Ndeps`) and LLM badge (`🤖`) for each item.
+- **Repo-list:** Shows detected languages per repository.
+- **Log command:** Shows `👥` contributor stats and test coverage delta per iteration.
+- **Iteration manifest:** Added `test_coverage_delta` (float) and `contributors` (dict) fields.
+- **Pending-review.json:** Added `affected_files`, `llm_suggestion`, `llm_implementation_hint` fields.
+- **Metrics:** `test_coverage_delta` field added to IterationMetrics.
+
+### Internal
+
+- `get_openclaw_llm_config()`, `call_llm()`, `analyze_with_llm()` — LLM integration
+- `detect_language_from_path()`, `detect_repo_languages()`, `get_todo_patterns_for_file()` — language detection
+- `scan_todos_multilang()`, `_scan_code_file()` — multi-language TODO scanning
+- `extract_imports()`, `build_dependency_map()`, `find_dependents()`, `analyze_dependencies()` — dependency analysis
+- `run_tests_for_hash()`, `run_test_comparison()` — test comparison
+- `track_contributors()` — contributor tracking
+- `create_release()` — release management
+- `run_llm_analysis_on_changes()` — orchestrates LLM analysis during scan
+- `TODO_PATTERNS`, `LANGUAGE_EXTENSIONS` constants
+- `llm_suggestion`, `llm_risk`, `llm_implementation_hint`, `affected_files` fields in ChangeItem
+- `test_coverage_delta`, `contributors` fields in IterationManifest
+- `release` subcommand added to CLI parser
+
+---
+
 ## [2.2.0] — 2026-04-05
 
 ### New Features

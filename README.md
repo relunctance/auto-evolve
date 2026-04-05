@@ -8,6 +8,8 @@
 
 > Your skills get smarter — automatically. Auto-Evolve scans your code, leverages LLM intelligence to suggest improvements, and evolves your tools with or without human oversight.
 
+**中文文档**：[README.zh-CN.md](README.zh-CN.md)
+
 ---
 
 ## Why Auto-Evolve?

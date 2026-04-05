@@ -1,6 +1,6 @@
-# Auto-Evolve v2.2
+# Auto-Evolve v3.0
 
-**Automated skill iteration manager with full audit trail.**
+**LLM-driven automated skill iteration manager with full audit trail.**
 
 > Make your skills continuously better — automatically.
 
@@ -8,28 +8,25 @@
 
 ## Overview
 
-Auto-Evolve v2.2 is a complete rewrite with multi-repository support, branch+PR workflows for high-risk changes, proactive optimization discovery, and two operation modes (semi-auto and full-auto).
+Auto-Evolve v3.0 is a major upgrade with LLM-powered code analysis, dependency awareness, and multi-language support.
 
 ```
-Scheduled Scan → Risk Classification → Learning Check → Mode Decision
-                                                            │
-                    ┌──────────────┴──────────────┐
-                 Semi-Auto                      Full-Auto
-                 (default)                       (per rules)
-                    │                               │
-              confirm to exec              execute_low_risk: true
-              pending review               execute_medium_risk: false
-              learnings track               execute_high_risk: false
+Scheduled Scan → LLM Analysis → Risk Classification → Learning Check → Mode Decision
+                     ↓                                                      ↓
+              🤖 LLM suggests              Semi-Auto                    Full-Auto
+              optimizations &             (confirm to exec)             (execute per rules)
+              refactoring hints
 ```
 
-### v2.2 New Features
+### v3.0 New Features
 
-- **True OpenClaw cron integration** — `schedule --every` actually creates the cron job via `openclaw cron add`
-- **Value-based priority scoring** — changes ranked by P = (value × 0.5) / (risk × cost)
-- **Iteration metrics** — every scan generates `metrics.json` (todos resolved, lines changed, etc.)
-- **PR batch merging** — similar small changes auto-merged into one PR
-- **Git conflict auto-resolution** — rebase conflicts resolved automatically when possible
-- **Approval reasons** — `approve --reason "your reason"` records rationale in learnings
+- **LLM-driven code analysis** — uses OpenClaw's configured LLM to analyze pending changes and suggest optimizations
+- **Dependency awareness** — tracks which files import/depend on changed files before applying
+- **Test comparison** — before/after test coverage delta when running tests at two git refs
+- **Cherry-pick rollback** — `rollback --to VERSION --item ID` reverts only a specific item
+- **Multi-language support** — Python, JavaScript, TypeScript, Go, Shell, Java
+- **Release management** — `release --version 2.3.0` creates git tag + GitHub release via gh CLI
+- **Contributor tracking** — shows auto-evolve vs manual commit ratio in `log` output
 
 ---
 
@@ -39,24 +36,13 @@ Scheduled Scan → Risk Classification → Learning Check → Mode Decision
 
 - Scan generates `pending-review.json`
 - Auto low-risk changes are **held** until you run `confirm`
+- LLM analysis runs on top 5 pending items
 - No changes are pushed until confirmed
-- Rejections are recorded in `.learnings/rejections.json`
 
 ### Full-Auto
 
 - Low/medium/high risk executed **automatically** per rules
-- No waiting for confirmation
-- Still shows execution preview before running
-- Learning history still tracks approvals
-
-```
-# Switch modes
-auto-evolve.py set-mode semi-auto
-auto-evolve.py set-mode full-auto
-
-# Configure full-auto rules
-auto-evolve.py set-rules --low true --medium false --high false
-```
+- Learning history tracks approvals
 
 ---
 
@@ -67,26 +53,39 @@ auto-evolve.py set-rules --low true --medium false --high false
 Scans all configured repositories for changes and optimization opportunities.
 
 ```bash
-# Full scan — respects current mode (semi-auto by default)
+# Full scan — respects current mode
 python3 auto-evolve.py scan
 
 # Preview — show what would happen without committing
 python3 auto-evolve.py scan --dry-run
 ```
 
+**v3.0: Language Detection**
+Automatically detects repository languages and uses appropriate TODO patterns.
+
+**v3.0: Dependency Analysis**
+Before applying changes, scans import statements to report which files depend on changed files:
+```
+⚠️  Dependency Alert:
+  Changing: soulforge/analyzer.py
+  May affect: soulforge/evolver.py (imports analyzer)
+```
+
+**v3.0: LLM Analysis**
+Top 5 pending items are analyzed by the configured LLM. Results show:
+- LLM suggestion for each change
+- Risk level adjustment if LLM disagrees
+- Implementation hints
+
+Output includes `🤖 LLM:` prefix for analyzed items.
+
 **What it scans:**
-- Git changes (added, modified, removed, untracked files)
-- TODO/FIXME/XXX/HACK/NOTE annotations
+- Git changes (added, modified, removed, untracked)
+- TODO/FIXME/XXX/HACK/NOTE (multi-language patterns)
 - Duplicate string patterns (3+ occurrences)
-- Long functions (>100 lines)
+- Long functions (>100 lines) — Python, JS, TS, Go
 - Missing test coverage
 - Pinned/outdated dependencies
-
-**Output:**
-- Iteration saved to `.iterations/{id}/`
-- `pending-review.json` — pending items (sanitized for closed repos)
-- `metrics.json` — iteration metrics (v2.2)
-- `alert.json` — generated if quality gates fail
 
 ---
 
@@ -95,10 +94,7 @@ python3 auto-evolve.py scan --dry-run
 Confirm and execute pending changes in semi-auto mode.
 
 ```bash
-# Confirm all pending from most recent iteration
 python3 auto-evolve.py confirm
-
-# Confirm from specific iteration
 python3 auto-evolve.py confirm --iteration 20260405-120000
 ```
 
@@ -109,31 +105,31 @@ python3 auto-evolve.py confirm --iteration 20260405-120000
 Reject a pending change and record in learning history.
 
 ```bash
-# Reject item 2
 auto-evolve.py reject 2 --reason "too risky"
-
-# Reject from specific iteration
-auto-evolve.py reject 3 --reason "not needed" --iteration 20260405-120000
 ```
-
-Rejections are stored in `.learnings/rejections.json` and prevent the same change from being re-recommended.
 
 ---
 
 ### approve
 
-**v2.2: Supports `--reason` for recording approval rationale.**
+Approve and execute pending changes.
 
 ```bash
-# Approve all pending items with reason
+# Approve all with reason
 auto-evolve.py approve --all --reason "valuable improvement"
 
-# Approve specific items by ID
-auto-evolve.py approve 1,3 --reason "worthwhile"
+# Approve specific items
+auto-evolve.py approve 1,3
 
-# Approve from a specific iteration
+# From specific iteration
 auto-evolve.py approve --all --iteration 20260405-120000
 ```
+
+**v3.0: Dependency and LLM badges in approve prompt:**
+```
+  [1] 🟢 P=0.85 MEDIUM: add-test: Add test for ask() ⚠️2deps 🤖
+```
+Shows `⚠️Ndeps` when item affects N dependent files, `🤖` when LLM analyzed.
 
 ---
 
@@ -145,17 +141,13 @@ Add a repository to the monitoring list.
 python3 auto-evolve.py repo-add ~/.openclaw/workspace/skills/hawk-bridge --type skill
 ```
 
-**Repository types:**
-- `skill` — A skill directory (default)
-- `norms` — Team norms/rules repository
-- `project` — General project repository
-- `closed` — Private/closed project (code changes default to medium risk, content sanitized)
+**Repository types:** `skill` | `norms` | `project` | `closed`
 
 ---
 
 ### repo-list
 
-List all configured repositories.
+List all configured repositories. v3.0 shows detected languages.
 
 ```bash
 python3 auto-evolve.py repo-list
@@ -165,21 +157,44 @@ python3 auto-evolve.py repo-list
 
 ### rollback
 
-Rollback changes from a previous iteration using `git revert`.
+**v3.0: Cherry-pick rollback — revert specific items without full revert.**
 
 ```bash
-# Rollback with reason
+# Full rollback of an iteration
 auto-evolve.py rollback --to 20260405-120000 --reason "broke feature X"
+
+# Cherry-pick: only rollback item #3
+auto-evolve.py rollback --to 20260405-120000 --item 3
 ```
+
+Cherry-pick mode finds and reverts only the commit matching the specified item ID.
+
+---
+
+### release (v3.0)
+
+Create a GitHub release with git tag + gh CLI.
+
+```bash
+# Basic release
+auto-evolve.py release --version 2.3.0
+
+# With changelog
+auto-evolve.py release --version 2.3.0 --changelog "## What's New\n- Feature A\n- Feature B"
+```
+
+Flow:
+1. Creates `v{version}` git tag
+2. Pushes tag to `origin`
+3. Creates GitHub release via `gh release create`
+4. Uses auto-evolve release notes template
 
 ---
 
 ### schedule
 
-**v2.2: Directly integrates with OpenClaw cron API.**
-
 ```bash
-# Set scan interval (creates cron job automatically)
+# Set scan interval (creates cron automatically)
 auto-evolve.py schedule --every 168   # every 168 hours (1 week)
 
 # Show current schedule
@@ -189,43 +204,46 @@ auto-evolve.py schedule --show
 auto-evolve.py schedule --remove
 ```
 
-When `openclaw` CLI is available, `schedule --every` creates the cron job directly. Otherwise falls back to manual instructions.
-
 ---
 
 ### learnings
 
-View learning history (rejections and approvals).
+View learning history.
 
 ```bash
-# Show all learnings
 auto-evolve.py learnings
-
-# Show only rejections
 auto-evolve.py learnings --type rejections
-
-# Show only approvals (v2.2 shows reasons)
-auto-evolve.py learnings --type approvals
-
-# Limit output
-auto-evolve.py learnings --limit 10
+auto-evolve.py learnings --type approvals --limit 10
 ```
 
 ---
 
 ### log
 
-View iteration history.
+**v3.0: Shows contributor stats and test coverage delta.**
 
 ```bash
 auto-evolve.py log --limit 5
 ```
 
+Example output:
+```
+📚 Iteration Log
+═══════════════════════════════════════════════════════════
+
+✅ 20260405-120000 📊 👥 8A/15M
+   Date: 2026-04-05T12:00:00+08:00
+   Status: completed
+   Auto: 3 | Approved: 5
+```
+
+`👥 8A/15M` = 8 auto-evolve commits / 15 manual commits
+
 ---
 
-## Priority Scoring (v2.2)
+## Priority Scoring
 
-Changes are ranked by a priority score: **P = (value × 0.5) / (risk × cost)**
+Changes ranked by **P = (value × 0.5) / (risk × cost)**
 
 | Factor | Range | Meaning |
 |--------|-------|---------|
@@ -233,141 +251,136 @@ Changes are ranked by a priority score: **P = (value × 0.5) / (risk × cost)**
 | Risk | 1-10 | Low=2, Medium=5, High=9 |
 | Cost | 1-10 | 5min=1, 1h=7, 2h+=10 |
 
-Example output:
+---
+
+## LLM Integration (v3.0)
+
+Auto-Evolve v3.0 uses OpenClaw's configured LLM — no separate API key needed.
+
+### How it works
+
+1. After scanning, top 5 pending (non-auto-exec) items sorted by priority
+2. For each item, reads the file and sends to LLM with context
+3. LLM returns: suggestion, risk_level, implementation_hint
+4. If LLM suggests different risk level, priority is recalculated
+5. LLM results stored in pending-review.json
+
+### Config Priority
+
+1. Environment variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
+2. Fallback: `MINIMAX_API_KEY`, `MINIMAX_BASE_URL`
+3. `openclaw config get llm` as last resort
+
+### Example LLM output
+
 ```
-📊 Priority Queue:
-  [1] 🟢 P=0.85 Fix TODO in analyzer.py (high value, low risk)
-  [2] 🟢 P=0.72 Add test coverage (medium value, low risk)
-  [3] 🟡 P=0.45 Refactor evolver.py (high value, high risk)
+🤖 LLM: This function could be simplified by extracting the validation logic
 ```
 
 ---
 
-## Iteration Metrics (v2.2)
+## Dependency Analysis (v3.0)
 
-Every scan generates `metrics.json`:
+When git changes are detected, auto-evolve:
+1. Scans all files for `import`/`require`/`from` statements
+2. Builds a dependency map
+3. For each changed file, finds files that import it
+4. Shows warnings before applying changes that affect dependents
 
-```json
-{
-  "iteration_id": "20260405-120000",
-  "date": "2026-04-05T12:00:00+08:00",
-  "metrics": {
-    "todos_resolved": 3,
-    "lint_errors_fixed": 5,
-    "test_coverage_delta": 2.3,
-    "files_changed": 4,
-    "lines_added": 120,
-    "lines_removed": 45,
-    "quality_gate_passed": true
-  }
-}
-```
+### Supported Languages
+
+| Language | Import Syntax |
+|----------|---------------|
+| Python | `import X`, `from X import Y` |
+| JavaScript/TypeScript | `require('X')`, `import from 'X'` |
+| Go | `import "X"` |
+| Java | `import X.Y.Z;` |
 
 ---
 
-## PR Batch Merging (v2.2)
+## Multi-Language TODO Patterns (v3.0)
 
-When multiple similar small changes are detected, they are automatically grouped into a single PR:
+| Extension | Patterns |
+|-----------|----------|
+| `.py` | `# TODO`, `# FIXME`, `# XXX`, `# HACK`, `# NOTE` |
+| `.js` / `.ts` | `// TODO`, `// FIXME`, `// XXX`, `// HACK`, `/* TODO */` |
+| `.go` | `// TODO`, `// FIXME`, `// XXX` |
+| `.sh` | `# TODO`, `# FIXME`, `# XXX` |
+| `.java` | `// TODO`, `// FIXME`, `// XXX`, `/* TODO */` |
+| `.md` | `<!-- TODO -->`, `[TODO]`, `- [ ]` |
+
+---
+
+## Test Comparison (v3.0)
+
+Run tests at two git refs and compare coverage:
 
 ```python
-should_merge_prs(changes)  # True if 3+ similar changes across ≤5 files
+result = run_test_comparison(repo, before_hash, after_hash)
+# Returns:
+# {
+#   "before_coverage": 72.5,
+#   "after_coverage": 74.2,
+#   "delta": +1.7,
+#   "tests_passed": True
+# }
 ```
 
-Groups are merged when they share the same type and related file paths.
+Results stored in `metrics.json` as `test_coverage_delta`.
+
+Requires: `pytest` and `coverage` plugin.
 
 ---
 
-## Git Conflict Handling (v2.2)
+## Release Management (v3.0)
 
-When a PR branch conflicts with `origin/main`:
-
-1. Fetches latest `main`
-2. Rebases onto `origin/main`
-3. If conflicts ≤ 2 files: auto-resolves and continues
-4. If conflicts > 2 files: flags as `manual_required`
-
----
-
-## Risk Classification
-
-| Level | Trigger | Action |
-|-------|---------|--------|
-| 🟢 Low | Docs, README, comments, typo fixes, lint | Auto-executable |
-| 🟡 Medium | New features, non-breaking additions, optimizations | Pending review |
-| 🔴 High | Breaking changes, deletions, architecture | Branch + PR |
-
-### Per-Type Defaults
-
-- `norms` repo: doc changes → low risk
-- `closed` repo: code changes → medium risk (content redacted)
-- `project` repo: test changes → medium risk
-
----
-
-## Proactive Optimizations
-
-| Type | What it finds | Risk |
-|------|---------------|------|
-| `todo_fixme` | Unresolved TODO/FIXME/XXX/HACK/NOTE | Low |
-| `duplicate_code` | Repeated string patterns (3x+) | Low |
-| `long_function` | Functions >100 lines | Medium |
-| `missing_test` | Modules without test coverage | Medium |
-| `outdated_dep` | Pinned dependency versions | Low |
-
----
-
-## Learning History
-
-Auto-Evolve tracks what you've approved and rejected:
-
-```
-.learnings/
-├── rejections.json    # Changes you've rejected (with reasons)
-└── approvals.json     # Changes you've approved (v2.2: with reasons)
+```bash
+auto-evolve.py release --version 2.3.0 [--changelog "..."]
 ```
 
-When scanning, rejected changes are skipped automatically. v2.2 approvals include the `--reason` text and `approved_by` field.
+Creates:
+1. Git tag `v2.3.0` with message
+2. Pushes tag to `origin`
+3. Creates GitHub release via `gh release create`
 
----
+Release notes template:
+```markdown
+# Release v2.3.0
 
-## Closed Repository Privacy
+## What changed
+[changelog content]
 
-For `visibility: "closed"` repositories:
-- `pending-review.json` contains no file paths or code content
-- File paths are replaced with `[REDACTED]`
-- Content hash references used instead
-- Log files do not contain change details
-
----
-
-## Execution Preview
-
-Before executing (even in full-auto mode), a preview is shown:
-
-```
-⚠️  Full-Auto Mode: About to execute 3 changes:
-  [1] 🟢 P=0.85 LOW: todo-fix: Remove TODO in soulforge/analyzer.py (line 45)
-  [2] 🟢 P=0.72 LOW: lint-fix: Format soulforge/evolver.py
-  [3] 🟡 P=0.45 MEDIUM: add-test: Add test for new ask() function
+## auto-evolve
+This release was managed by auto-evolve.
 ```
 
 ---
 
-## Quality Gates & Alerts
+## Contributor Tracking (v3.0)
 
-Quality gates check Python syntax before committing. If gates fail:
-- An `alert.json` is generated in the iteration directory
-- The iteration is flagged with `has_alert: true`
-- The scan continues but reports the failure
+`track_contributors()` scans git log and distinguishes:
+- **auto commits**: messages starting with `auto:` or `auto-evolve:`
+- **manual commits**: everything else
+
+Stats shown in `log` output and stored in iteration manifest:
+```
+👥 {auto_commits}A/{manual_commits}M  ({auto_percentage}% auto)
+```
+
+---
+
+## Iteration Record Format
 
 ```
-.iterations/{id}/
-├── manifest.json
-├── alert.json     # Alert content (if quality gate failed)
-├── plan.md
-├── pending-review.json
-├── report.md
-└── metrics.json   # v2.2: iteration metrics
+.auto-evolve/
+└── .iterations/
+    └── {id}/
+        ├── manifest.json        # Metadata + pending items (v3.0: contributors, test_delta)
+        ├── plan.md              # Plan with all changes
+        ├── pending-review.json   # Items awaiting review (v3.0: llm_analysis, affected_files)
+        ├── report.md            # Execution results
+        ├── metrics.json         # Iteration metrics (v3.0: test_coverage_delta)
+        └── alert.json           # Quality gate alert (if any)
 ```
 
 ---
@@ -406,56 +419,12 @@ File: `~/.auto-evolverc.json`
 }
 ```
 
-### Per-Repository Options
-
-```json
-{
-  "path": "~/path/to/repo",
-  "type": "skill|norms|project|closed",
-  "visibility": "public|closed",
-  "auto_monitor": true,
-  "risk_override": "low|medium|high"
-}
-```
-
----
-
-## Branch + PR Flow
-
-For **high-risk** changes:
-1. Creates branch: `auto-evolve/{description}`
-2. Rebases onto `origin/main` (handles conflicts)
-3. Commits the change
-4. Creates GitHub PR with `gh` CLI
-5. User merges PR manually after reviewing
-
----
-
-## Iteration Record Format
-
-```
-.auto-evolve/
-└── .iterations/
-    └── {id}/
-        ├── manifest.json        # Metadata + pending items
-        ├── plan.md              # Plan with all changes
-        ├── pending-review.json   # Items awaiting review (sanitized for closed repos)
-        ├── report.md            # Execution results
-        ├── metrics.json          # v2.2: iteration metrics
-        └── alert.json           # Quality gate alert (if any)
-```
-
 ---
 
 ## Requirements
 
 - Python 3.10+
 - Git
-- `gh` CLI (for PR creation)
-- `openclaw` CLI (v2.2: for true cron integration)
-
----
-
-## License
-
-MIT
+- `gh` CLI (for PR creation and releases)
+- `openclaw` CLI (for cron integration and LLM config)
+- `pytest` + `coverage` (optional, for test comparison)
