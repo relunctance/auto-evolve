@@ -1174,13 +1174,32 @@ def call_llm(prompt: str, system: str = "", model: str = "", base_url: str = "",
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
     messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
     body = json.dumps({"model": model or "MiniMax-M2", "messages": messages, "temperature": 0.3, "max_tokens": 16000}).encode("utf-8")
-    try:
-        req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    except Exception:
-        return ""
+    # Try Anthropic /v1/messages first (MiniMax and other Anthropic-compatible APIs)
+    for endpoint_suffix in ["/v1/messages", "/chat/completions"]:
+        endpoint = base_url.rstrip("/") + endpoint_suffix
+        try:
+            req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "anthropic" in endpoint or endpoint_suffix == "/v1/messages":
+                    text_blocks = [
+                        b.get("text", "") for b in data.get("content", [])
+                        if b.get("type") == "text" and b.get("text", "").strip()
+                    ]
+                    if text_blocks:
+                        return max(text_blocks, key=len)
+                    thinking_blocks = [
+                        b.get("thinking", "") for b in data.get("content", [])
+                        if b.get("type") == "thinking" and b.get("thinking", "").strip()
+                    ]
+                    if thinking_blocks:
+                        return "\n".join(thinking_blocks)
+                    return ""
+                # OpenAI-style response
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        except Exception:
+            continue
+    return ""
 
 
 def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> dict:
@@ -3241,22 +3260,25 @@ class FileAnalysisCache:
 
 
 # ===========================================================
-# ProductThinkingScanner (v3.5)
-# Batch analysis + 10-min cache to slash LLM calls
+# ProductThinkingScanner (v3.6)
+# Phase 1: Product docs — README/SKILL.md → extract pain points → ask LLM what's still broken
+# Phase 2: Code files — implementation quality (secondary, lower priority)
 # ===========================================================
 
 class ProductThinkingScanner:
     """
-    Scans the codebase asking: what is actually broken for users?
-    This is NOT a code quality scanner.
+    Scans from the PRODUCT perspective: what does the project CLAIM to solve,
+    and which of those problems are actually still broken?
 
-    v3.5 changes:
-    - FileAnalysisCache: 30-min TTL per file, survives process restart
-    - Batch analysis: up to 5 files per LLM call instead of 1 file = 1 call
+    Phase 1 (high priority): Read README/SKILL.md, extract documented pain points,
+      ask LLM which ones are still unresolved.
+    Phase 2 (lower priority): Scan code files for implementation quality issues.
+
+    This is NOT a code quality scanner — code quality is secondary to product truth.
     """
 
-    # Files per LLM call in batch mode
     BATCH_SIZE = 5
+    DOC_BATCH_SIZE = 3   # doc files are larger, fewer per batch
 
     def __init__(self, repos: list[Repository], config: dict,
                  recall_persona: str = "", memory_source: str = "auto") -> None:
@@ -3307,6 +3329,12 @@ class ProductThinkingScanner:
             return f"No learnings history yet for {self.effective_persona}."
 
     def scan(self) -> list[ProductThinkingFinding]:
+        """
+        Two-phase scan:
+        1. Product docs (README/SKILL.md) — extract documented pain points, ask what's still broken
+        2. Code files — implementation quality (secondary)
+        3. Learnings patterns — corrections that keep being rejected
+        """
         all_findings: list[ProductThinkingFinding] = []
         print(f"[ProductThinkingScanner] Starting scan of {len(self.repos)} repos...")
         for repo in self.repos:
@@ -3315,36 +3343,213 @@ class ProductThinkingScanner:
             repo_path = repo.resolve_path()
             if not repo_path.exists():
                 continue
-            findings = self._scan_key_files(repo)
-            all_findings.extend(findings)
+
+            # Phase 1: Product docs (high priority — these define WHAT should be solved)
+            print(f"\n  [Phase 1] Product docs — pain points from README/SKILL.md...")
+            doc_findings = self._scan_product_docs(repo)
+            all_findings.extend(doc_findings)
+
+            # Phase 2: Code files (secondary — HOW well it's implemented)
+            print(f"\n  [Phase 2] Code files — implementation quality...")
+            code_findings = self._scan_code_files(repo)
+            all_findings.extend(code_findings)
+
+            # Phase 3: Learnings patterns
             learnings_findings = self._analyze_learnings_patterns(repo)
             all_findings.extend(learnings_findings)
+
         all_findings.sort(key=lambda f: f.impact_score, reverse=True)
         return all_findings
 
-    def _scan_key_files(self, repo: Repository) -> list[ProductThinkingFinding]:
+    def _scan_product_docs(self, repo: Repository) -> list[ProductThinkingFinding]:
         """
-        Collects all priority files, checks cache, then sends remaining files
-        to LLM in batches of BATCH_SIZE (5) to minimize LLM calls.
+        Phase 1: Read README.md, README.zh-CN.md, SKILL.md and extract documented
+        pain points. Ask LLM which of these pain points are still unresolved.
         """
         findings: list[ProductThinkingFinding] = []
         repo_path = repo.resolve_path()
 
-        # 1. Collect all priority files
-        priority_files: list[tuple[Path, str, str]] = []  # (Path, rel_path, content)
-        sentinels = [
-            repo_path / "README.md",
-            repo_path / "SOUL.md",
-            repo_path / "AGENTS.md",
-        ]
-        for fp in sentinels:
+        doc_files = []
+        for fname in ["README.md", "README.zh-CN.md", "SKILL.md"]:
+            fp = repo_path / fname
             if fp.exists():
-                priority_files.append((fp, str(fp.relative_to(repo_path)), ""))
-        for skill_dir in (repo_path / "skills").glob("*"):
-            md = skill_dir / "SKILL.md"
-            if md.exists():
-                priority_files.append((md, str(md.relative_to(repo_path)), ""))
+                try:
+                    content = fp.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if len(content) > 8000:
+                    content = content[:8000]
+                doc_files.append((str(fp.relative_to(repo_path)), content))
+
+        if not doc_files:
+            print(f"  [Phase 1] No doc files found — skipping product doc scan")
+            return findings
+
+        print(f"  [Phase 1] Found {len(doc_files)} doc file(s): {[f[0] for f in doc_files]}")
+
+        # Check cache for each doc file
+        uncached: list[tuple[str, str]] = []
+        for rel_path, content in doc_files:
+            cached = self._cache.get(rel_path, content)
+            if cached:
+                parsed_list = cached.get("results", [])
+                for item in parsed_list:
+                    finding = self._parse_finding(item, rel_path)
+                    if finding:
+                        findings.append(finding)
+                        print(f"    [cache hit] {rel_path}")
+            else:
+                uncached.append((rel_path, content))
+
+        if not uncached:
+            return findings
+
+        # Batch uncached doc files
+        total_batches = (len(uncached) + self.DOC_BATCH_SIZE - 1) // self.DOC_BATCH_SIZE
+        print(f"  [Phase 1] {len(uncached)} doc files uncached — batching into {total_batches} LLM call(s)")
+        for batch_idx in range(total_batches):
+            batch = uncached[batch_idx * self.DOC_BATCH_SIZE:(batch_idx + 1) * self.DOC_BATCH_SIZE]
+            results = self._batch_analyze_product_docs(batch, repo)
+            for rel_path, content in batch:
+                result = results.get(rel_path, {})
+                self._cache.set(rel_path, content, result)
+                # result is a dict with "results": list[parsed_items]
+                for item in result.get("results", []):
+                    finding = self._parse_finding(item, rel_path)
+                    if finding:
+                        findings.append(finding)
+
+        return findings
+
+    def _batch_analyze_product_docs(
+        self, batch: list[tuple[str, str]], repo: Repository
+    ) -> dict[str, dict]:
+        """
+        Analyze a batch of product doc files (README/SKILL.md).
+        Extract documented pain points, then ask LLM which ones are STILL broken.
+        Returns dict: file_path -> {results: [list of findings]}
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return {}
+
+        hawk_block = ""
+        if self.hawk_prefs.get("disliked"):
+            hawk_block += "\n\n主人不喜欢的东西：\n" + "\n".join(
+                f"  - {d}" for d in self.hawk_prefs["disliked"][:3]
+            )
+        if self.hawk_prefs.get("liked"):
+            hawk_block += "\n\n主人喜欢的东西：\n" + "\n".join(
+                f"  - {l}" for l in self.hawk_prefs["liked"][:3]
+            )
+
+        # Build doc sections with pain point extraction context
+        doc_sections: list[str] = []
+        for rel_path, content in batch:
+            doc_sections.append(
+                f"--- FILE: {rel_path} ---\n{content[:6000]}"
+            )
+        docs_block = "\n\n".join(doc_sections)
+
+        system = (
+            f"You are a product reviewer for the OpenClaw ecosystem.\n\n"
+            f"【Persona: {self.effective_persona}】\n"
+            f"【Context】\n{self.master_summary}\n"
+            f"【Preferences】\n{hawk_block or '(无偏好记忆)'}\n\n"
+            "You are analyzing a project that CLAIMS to solve certain problems.\n"
+            "Your job: Look at the documented pain points in the files below, then identify\n"
+            "which of those claimed problems are STILL BROKEN or only partially solved.\n\n"
+            "Look specifically for:\n"
+            "  - Pain points labeled ❌ in the documentation\n"
+            "  - 'Core Problem' sections describing what's broken\n"
+            "  - 'Pain Points' tables listing unsolved issues\n"
+            "  - 'Before vs After' examples where 'After' is still weak\n"
+            "  - Features that claim to solve X but evidence shows X is still happening\n\n"
+            "Answer with a JSON array. Each element must have:\n"
+            "  file_path: (string) the source file\n"
+            "  insight: (string, Chinese) what's still broken, specific and honest\n"
+            "  category: one of: pain_point_unresolved | partial_solution | wrong_approach | missing_feature\n"
+            "  pain_point: (string) the ORIGINAL documented pain point you're referencing\n"
+            "  impact: (float 0.0-1.0) how much this still hurts users\n"
+            "  evidence: (array) 1-2 short text snippets from the doc or your reasoning\n"
+            "  suggested_direction: (string, Chinese) one concrete next step\n"
+            "  why_now: (string) why this matters right now\n\n"
+            "If all documented pain points appear genuinely solved, return [] (empty array).\n"
+            "Be specific. 'It works' is not a finding. 'The pain point is still present because X' is."
+        )
+
+        prompt = (
+            "IMPORTANT: Answer with ONLY a JSON array. No fences, no explanation outside JSON.\n\n"
+            f"{docs_block}\n\n"
+            "Identify which documented pain points are STILL BROKEN. "
+            "Return a JSON array, one element per finding."
+        )
+
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            model=config["model"],
+            base_url=config["base_url"],
+            api_key=config["api_key"],
+        )
+
+        if not result:
+            return {}
+
+        output: dict[str, dict] = {}
+        for rel_path, content in batch:
+            output[rel_path] = {"results": []}
+
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            m = re.search(r'\[[\s\S]*\]', result)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except Exception:
+                    return output
+            else:
+                return output
+
+        if not isinstance(parsed, list):
+            return output
+
+        # Map findings back to their source files
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("file_path", "")
+            if fp in output:
+                output[fp]["results"].append(item)
+            else:
+                # Assign to first file if file_path not matched
+                first_key = next(iter(output), None)
+                if first_key:
+                    output[first_key]["results"].append(item)
+
+        return output
+
+    def _scan_code_files(self, repo: Repository) -> list[ProductThinkingFinding]:
+        """
+        Phase 2: Scan code files for implementation quality.
+        NOTE: README/SKILL.md/SOUL.md/AGENTS.md are handled by _scan_product_docs.
+        """
+        findings: list[ProductThinkingFinding] = []
+        repo_path = repo.resolve_path()
+
+        # Only code files — docs handled by _scan_product_docs
+        skip_names = {
+            "README.md", "README.zh-CN.md", "SKILL.md",
+            "SOUL.md", "AGENTS.md", "MEMORY.md", "TOOLS.md",
+            "USER.md", "IDENTITY.md", "HEARTBEAT.md",
+            "BOOTSTRAP.md",
+        }
+
+        priority_files: list[tuple[Path, str, str]] = []
         for script in list(repo_path.glob("scripts/*.py")) + list(repo_path.glob("*.py")):
+            if script.name in skip_names:
+                continue
             if script.exists():
                 priority_files.append((script, str(script.relative_to(repo_path)), ""))
 
