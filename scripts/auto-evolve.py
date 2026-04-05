@@ -912,26 +912,21 @@ def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> di
         return {"suggestion": "", "risk_level": "medium", "implementation_hint": "", "available": False}
     lang = detect_language_from_path(repo_path)
     system = (
-        "You are a senior product evolution advisor. "
-        "Your job is NOT to review code quality — it is to ask the RIGHT questions about the product. "
-        "When you see code, ask: "
-        "  1. What is broken from a USER perspective (not developer)? "
-        "  2. What would make a user say 'this is confusing' or 'why does this exist'? "
-        "  3. What should we STOP doing? "
-        "  4. What is missing that users secretly want but never ask for? "
-        "  5. What is technically clever but practically useless? "
+        "You are a product reviewer. "
+        "IMPORTANT: Use EXACTLY this question as your guide for EVERYTHING you output:\n"
+        "\"还有什么不足, 有哪些地方可以优化, 使用体验如何？\"\n"
         "Return valid JSON with keys: "
-        "  suggestion (a sharp, opinionated product question or stop-doing THIS, max 200 chars), "
+        "  suggestion (answer to '还有什么不足, 有哪些地方可以优化, 使用体验如何？' — max 200 chars, honest and specific), "
         "  risk_level (low/medium/high), "
-        "  implementation_hint (one concrete next step, max 100 chars), "
+        "  implementation_hint (one concrete next step to address the issue, max 100 chars), "
         "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature). "
-        "Only JSON. Be brutally honest. Prefer 'stop doing X' over 'add more features'."
+        "Only JSON. Be honest. Do not add features if the real issue is removing or fixing something."
     )
     prompt = (
         "IMPORTANT: Answer with ONLY a JSON object. No explanation, no markdown fences.\n\n"
         "Code:\n```" + lang + "\n" + code_snippet[:2000] + "\n```\n\n"
         "Context: " + context + "\n\n"
-        "Ask: what is really broken here? What should we stop, start, or question?"
+        "请回答：还有什么不足, 有哪些地方可以优化, 使用体验如何？"
     )
     result = call_llm(prompt=prompt, system=system, model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
     if not result:
@@ -2912,26 +2907,23 @@ class ProductThinkingScanner:
         if not config.get("api_key") or not config.get("base_url"):
             return None
         system = (
-            "You are a brutally honest product advisor. "
-            "You see code and docs, and you ask: "
-            "  1. What would a user complain about after 5 minutes of this? "
-            "  2. What is this project's blind spot — the thing they built but nobody asked for? "
-            "  3. What is secretly annoying but presented as a feature? "
-            "  4. What should they STOP doing and start doing instead? "
+            "You are a product reviewer. "
+            "IMPORTANT: The core question you must answer for every file:\n"
+            "\"还有什么不足, 有哪些地方可以优化, 使用体验如何？\"\n"
             "Answer ONLY with a JSON object with keys: "
-            "  insight (max 150 chars, sharp and honest), "
+            "  insight (answer to '还有什么不足, 有哪些地方可以优化, 使用体验如何？' — max 150 chars, honest), "
             "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature), "
             "  impact (0.0 to 1.0), "
-            "  evidence (array of 1-2 short text snippets from the content). "
+            "  evidence (array of 1-2 short text snippets from the content that support this). "
             "If nothing significant is broken, return {\"insight\": \"\", \"category\": \"ok\", \"impact\": 0.0, \"evidence\": []}. "
-            "Be harsh. Surface the uncomfortable truth."
+            "Be honest. Focus on what to STOP or FIX, not just what to add."
         )
         lang = detect_language_from_path(file_path)
         prompt = (
             "IMPORTANT: Answer with ONLY a JSON object. No explanation.\n\n"
             f"File: {file_path}\n\n"
             f"Content (excerpt):\n```{lang}\n{content[:5000]}\n```\n\n"
-            "What is broken from a user's perspective?"
+            "请回答：还有什么不足, 有哪些地方可以优化, 使用体验如何？"
         )
         result = call_llm(prompt=prompt, system=system, model=config["model"],
                           base_url=config["base_url"], api_key=config["api_key"])
