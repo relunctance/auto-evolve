@@ -3329,8 +3329,126 @@ class FourPerspectiveScanner:
         "TECH":    "references/code-standards.md",
     }
 
+    # Built-in default reference docs (used when project-standard is not installed)
+    # v4.1: These ensure auto-evolve works standalone without project-standard
+    DEFAULT_REF_DOCS = {
+        "USER": """## User Perspective — Built-in Default Standards
+
+### 1. CLI / Interaction Design
+- Flag names are intuitive (--dry-run not --simulate-mode)
+- Reasonable defaults (don't require all flags to run)
+- --help is clear, explains usage not just lists flags
+- Subcommand structure is logical (git clone not git --clone)
+- No unnecessary interactive prompts
+
+### 2. Learning Curve
+- README has "Quick Start" — up in 3 steps
+- Has example input/output
+- No dependency黑洞 (no circular install requirements)
+- Error messages suggest fixes
+
+### 3. Error Messages
+- Error explains WHAT went wrong, not just "Error occurred"
+- Has fix suggestions ("You may need to: ...")
+- Distinguishes: config error vs runtime error vs data error
+- Log levels are clear (ERROR/WARNING/INFO)
+
+### 4. Fault Tolerance
+- Operations are atomic — no half-baked state on failure
+- Has backup/rollback mechanism
+- Failures give clear error + recovery guide
+- Idempotent: running twice has no side effects
+
+### 5. Workflow Efficiency
+- Core operations complete in <=3 steps
+- Config files preferred over repeated flag passing
+- Supports pipeline/chain for automation
+- Has batch mode""",
+
+        "PRODUCT": """## Product Perspective — Built-in Default Standards
+
+### README Promises vs Reality
+- README claims features — verify they are actually implemented
+- "Done" markers in docs reflect actual status
+- Pain points documented in README are actively worked on
+
+### Feature Completeness
+- Claimed features are complete, not half-baked
+- API contract matches documentation
+- Breaking changes are documented
+
+### Docs Consistency
+- Documentation says the same thing as the code
+- No "TODO: document this" left in final docs
+- Examples in docs are runnable
+
+### Missing Features
+- Essential features for the stated use case are present
+- Common user workflows are all supported""",
+
+        "PROJECT": """## Project Perspective — Built-in Default Standards
+
+### Learnings Loop
+- Learnings from previous inspections are tracked
+- Same mistakes are not repeated
+- Feedback from rejections influences future behavior
+
+### Inspection Rhythm
+- Regular inspection schedule exists (not "scan when we remember")
+- auto-evolve schedule is configured and running
+
+### Config Rationality
+- No over-engineering (too many config options)
+- No under-engineering (missing essential configs)
+- Configuration is documented
+
+### Dependency Health
+- Dependencies are not outdated (check for old versions)
+- No known security vulnerabilities in deps
+- No unnecessary dependencies (bloat)
+
+### Git Practices
+- Commit messages are meaningful
+- No giant PRs (break up large changes)
+- Version tags exist for releases""",
+
+        "TECH": """## Tech Perspective — Built-in Default Standards
+
+### Code Quality
+- No duplicate code blocks (DRY principle)
+- Functions are short (<=50 lines)
+- No magic numbers or hardcoded strings
+- Naming is consistent and descriptive
+
+### Security
+- No hardcoded passwords/tokens/secrets in code
+- No SQL/NoSQL injection risks (use parameterized queries)
+- Authentication/authorization is properly implemented
+- Input validation on all user inputs
+
+### Performance
+- No N+1 queries (lazy loading where appropriate)
+- No large loops that block the event loop
+- Async/await used for I/O-bound operations
+- Large data sets are paginated
+
+### Error Handling
+- No bare except: clauses
+- Errors are not silently swallowed
+- Errors propagate correctly through call stack
+- All exceptions have meaningful messages
+
+### Testing
+- Core logic has unit tests
+- Tests are not just happy-path
+- Test files are co-located with source files""",
+    }
+
     def _load_project_standard_docs(self) -> dict[str, str]:
-        """Load project-standard reference docs from the skills directory."""
+        """Load project-standard reference docs from the skills directory.
+
+        Falls back to built-in DEFAULT_REF_DOCS if project-standard is not installed.
+        """
         # Find project-standard skill directory
         skill_dirs = [
             Path.home() / ".openclaw" / "workspace" / "skills" / "project-standard",
@@ -3344,8 +3462,8 @@ class FourPerspectiveScanner:
 
         docs = {}
         if ps_dir is None:
-            print("[FourPerspectiveScanner] WARNING: project-standard not found, using internal standards")
-            return docs
+            print("[FourPerspectiveScanner] project-standard not found, using built-in default standards")
+            return self.DEFAULT_REF_DOCS.copy()
 
         print(f"[FourPerspectiveScanner] Loading project-standard from {ps_dir}")
         for perspective, rel_path in self.PERSPECTIVE_REF_DOCS.items():
@@ -3353,11 +3471,13 @@ class FourPerspectiveScanner:
             if file_path.exists():
                 try:
                     docs[perspective] = file_path.read_text(encoding="utf-8")
-                    print(f"  ✓ Loaded {perspective} → {rel_path}")
+                    print(f"  [OK] {perspective} → {rel_path}")
                 except OSError as e:
-                    print(f"  ✗ Failed to load {rel_path}: {e}")
+                    print(f"  [FAIL] {perspective} {rel_path}: {e}")
+                    docs[perspective] = self.DEFAULT_REF_DOCS.get(perspective, "")
             else:
-                print(f"  - Skipped {rel_path} (not found)")
+                print(f"  [SKIP] {perspective} {rel_path} (not found) — using built-in default")
+                docs[perspective] = self.DEFAULT_REF_DOCS.get(perspective, "")
         return docs
 
     def _detect_project_type(self, repo_path: Path) -> tuple[str, str]:
