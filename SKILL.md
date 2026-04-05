@@ -2,47 +2,31 @@
 
 **LLM-driven automated skill iteration manager with full audit trail.**
 
-> Make your skills continuously better — automatically.
+> Make your skills continuously better -- automatically.
 
 ---
 
 ## Overview
 
-Auto-Evolve v3.0 is a major upgrade with LLM-powered code analysis, dependency awareness, and multi-language support.
+Auto-Evolve v3.0 adds LLM-powered code analysis, dependency awareness, multi-language support, and more.
 
 ```
-Scheduled Scan → LLM Analysis → Risk Classification → Learning Check → Mode Decision
-                     ↓                                                      ↓
-              🤖 LLM suggests              Semi-Auto                    Full-Auto
-              optimizations &             (confirm to exec)             (execute per rules)
+Scheduled Scan -> LLM Analysis -> Risk Classification -> Learning Check -> Mode Decision
+                     |                                                      |
+              [LLM suggests]              Semi-Auto                    Full-Auto
+              optimizations &            (confirm to exec)             (execute per rules)
               refactoring hints
 ```
 
 ### v3.0 New Features
 
-- **LLM-driven code analysis** — uses OpenClaw's configured LLM to analyze pending changes and suggest optimizations
-- **Dependency awareness** — tracks which files import/depend on changed files before applying
-- **Test comparison** — before/after test coverage delta when running tests at two git refs
-- **Cherry-pick rollback** — `rollback --to VERSION --item ID` reverts only a specific item
-- **Multi-language support** — Python, JavaScript, TypeScript, Go, Shell, Java
-- **Release management** — `release --version 2.3.0` creates git tag + GitHub release via gh CLI
-- **Contributor tracking** — shows auto-evolve vs manual commit ratio in `log` output
-
----
-
-## Operation Modes
-
-### Semi-Auto (Default)
-
-- Scan generates `pending-review.json`
-- Auto low-risk changes are **held** until you run `confirm`
-- LLM analysis runs on top 5 pending items
-- No changes are pushed until confirmed
-
-### Full-Auto
-
-- Low/medium/high risk executed **automatically** per rules
-- Learning history tracks approvals
+- **LLM-driven code analysis** -- uses OpenClaw configured LLM (no separate API key)
+- **Dependency awareness** -- tracks which files depend on changed files
+- **Test comparison** -- before/after test coverage delta
+- **Cherry-pick rollback** -- `rollback --to VERSION --item ID` reverts only specific item
+- **Multi-language support** -- Python, JavaScript, TypeScript, Go, Shell, Java
+- **Release management** -- `release --version 2.3.0` creates git tag + GitHub release
+- **Contributor tracking** -- shows auto-evolve vs manual commit ratio in `log`
 
 ---
 
@@ -53,10 +37,7 @@ Scheduled Scan → LLM Analysis → Risk Classification → Learning Check → M
 Scans all configured repositories for changes and optimization opportunities.
 
 ```bash
-# Full scan — respects current mode
 python3 auto-evolve.py scan
-
-# Preview — show what would happen without committing
 python3 auto-evolve.py scan --dry-run
 ```
 
@@ -64,26 +45,25 @@ python3 auto-evolve.py scan --dry-run
 Automatically detects repository languages and uses appropriate TODO patterns.
 
 **v3.0: Dependency Analysis**
-Before applying changes, scans import statements to report which files depend on changed files:
+Reports which files depend on changed files before applying:
 ```
-⚠️  Dependency Alert:
-  Changing: soulforge/analyzer.py
-  May affect: soulforge/evolver.py (imports analyzer)
+  [!] Dependency Alert: Changing: soulforge/analyzer.py
+     May affect: soulforge/evolver.py (imports analyzer)
 ```
 
 **v3.0: LLM Analysis**
-Top 5 pending items are analyzed by the configured LLM. Results show:
+Top 5 pending items analyzed by the configured LLM. Results include:
 - LLM suggestion for each change
 - Risk level adjustment if LLM disagrees
 - Implementation hints
 
-Output includes `🤖 LLM:` prefix for analyzed items.
+Output includes `[LLM]` prefix for analyzed items.
 
 **What it scans:**
 - Git changes (added, modified, removed, untracked)
 - TODO/FIXME/XXX/HACK/NOTE (multi-language patterns)
 - Duplicate string patterns (3+ occurrences)
-- Long functions (>100 lines) — Python, JS, TS, Go
+- Long functions (>100 lines) -- Python, JS, TS, Go
 - Missing test coverage
 - Pinned/outdated dependencies
 
@@ -125,12 +105,6 @@ auto-evolve.py approve 1,3
 auto-evolve.py approve --all --iteration 20260405-120000
 ```
 
-**v3.0: Dependency and LLM badges in approve prompt:**
-```
-  [1] 🟢 P=0.85 MEDIUM: add-test: Add test for ask() ⚠️2deps 🤖
-```
-Shows `⚠️Ndeps` when item affects N dependent files, `🤖` when LLM analyzed.
-
 ---
 
 ### repo-add
@@ -141,7 +115,7 @@ Add a repository to the monitoring list.
 python3 auto-evolve.py repo-add ~/.openclaw/workspace/skills/hawk-bridge --type skill
 ```
 
-**Repository types:** `skill` | `norms` | `project` | `closed`
+Repository types: `skill` | `norms` | `project` | `closed`
 
 ---
 
@@ -157,7 +131,7 @@ python3 auto-evolve.py repo-list
 
 ### rollback
 
-**v3.0: Cherry-pick rollback — revert specific items without full revert.**
+**v3.0: Cherry-pick rollback -- revert specific items without full revert.**
 
 ```bash
 # Full rollback of an iteration
@@ -167,8 +141,6 @@ auto-evolve.py rollback --to 20260405-120000 --reason "broke feature X"
 auto-evolve.py rollback --to 20260405-120000 --item 3
 ```
 
-Cherry-pick mode finds and reverts only the commit matching the specified item ID.
-
 ---
 
 ### release (v3.0)
@@ -176,18 +148,14 @@ Cherry-pick mode finds and reverts only the commit matching the specified item I
 Create a GitHub release with git tag + gh CLI.
 
 ```bash
-# Basic release
 auto-evolve.py release --version 2.3.0
-
-# With changelog
-auto-evolve.py release --version 2.3.0 --changelog "## What's New\n- Feature A\n- Feature B"
+auto-evolve.py release --version 2.3.0 --changelog "## What's New\n- Feature A"
 ```
 
 Flow:
 1. Creates `v{version}` git tag
 2. Pushes tag to `origin`
 3. Creates GitHub release via `gh release create`
-4. Uses auto-evolve release notes template
 
 ---
 
@@ -195,7 +163,7 @@ Flow:
 
 ```bash
 # Set scan interval (creates cron automatically)
-auto-evolve.py schedule --every 168   # every 168 hours (1 week)
+auto-evolve.py schedule --every 168
 
 # Show current schedule
 auto-evolve.py schedule --show
@@ -228,22 +196,19 @@ auto-evolve.py log --limit 5
 
 Example output:
 ```
-📚 Iteration Log
-═══════════════════════════════════════════════════════════
-
-✅ 20260405-120000 📊 👥 8A/15M
+[check] 20260405-120000 [METRICS] [C]8A/15M
    Date: 2026-04-05T12:00:00+08:00
    Status: completed
    Auto: 3 | Approved: 5
 ```
 
-`👥 8A/15M` = 8 auto-evolve commits / 15 manual commits
+`[C] 8A/15M` = 8 auto-evolve commits / 15 manual commits
 
 ---
 
 ## Priority Scoring
 
-Changes ranked by **P = (value × 0.5) / (risk × cost)**
+Changes ranked by **P = (value x 0.5) / (risk x cost)**
 
 | Factor | Range | Meaning |
 |--------|-------|---------|
@@ -255,11 +220,11 @@ Changes ranked by **P = (value × 0.5) / (risk × cost)**
 
 ## LLM Integration (v3.0)
 
-Auto-Evolve v3.0 uses OpenClaw's configured LLM — no separate API key needed.
+Auto-Evolve v3.0 uses OpenClaw's configured LLM -- no separate API key needed.
 
 ### How it works
 
-1. After scanning, top 5 pending (non-auto-exec) items sorted by priority
+1. After scanning, top 5 pending items sorted by priority
 2. For each item, reads the file and sends to LLM with context
 3. LLM returns: suggestion, risk_level, implementation_hint
 4. If LLM suggests different risk level, priority is recalculated
@@ -267,15 +232,9 @@ Auto-Evolve v3.0 uses OpenClaw's configured LLM — no separate API key needed.
 
 ### Config Priority
 
-1. Environment variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
+1. Environment: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
 2. Fallback: `MINIMAX_API_KEY`, `MINIMAX_BASE_URL`
 3. `openclaw config get llm` as last resort
-
-### Example LLM output
-
-```
-🤖 LLM: This function could be simplified by extracting the validation logic
-```
 
 ---
 
@@ -343,17 +302,6 @@ Creates:
 2. Pushes tag to `origin`
 3. Creates GitHub release via `gh release create`
 
-Release notes template:
-```markdown
-# Release v2.3.0
-
-## What changed
-[changelog content]
-
-## auto-evolve
-This release was managed by auto-evolve.
-```
-
 ---
 
 ## Contributor Tracking (v3.0)
@@ -362,10 +310,7 @@ This release was managed by auto-evolve.
 - **auto commits**: messages starting with `auto:` or `auto-evolve:`
 - **manual commits**: everything else
 
-Stats shown in `log` output and stored in iteration manifest:
-```
-👥 {auto_commits}A/{manual_commits}M  ({auto_percentage}% auto)
-```
+Stats shown in `log` output and stored in iteration manifest.
 
 ---
 
@@ -373,14 +318,14 @@ Stats shown in `log` output and stored in iteration manifest:
 
 ```
 .auto-evolve/
-└── .iterations/
-    └── {id}/
-        ├── manifest.json        # Metadata + pending items (v3.0: contributors, test_delta)
-        ├── plan.md              # Plan with all changes
-        ├── pending-review.json   # Items awaiting review (v3.0: llm_analysis, affected_files)
-        ├── report.md            # Execution results
-        ├── metrics.json         # Iteration metrics (v3.0: test_coverage_delta)
-        └── alert.json           # Quality gate alert (if any)
+  .iterations/
+    {id}/
+      manifest.json        -- Metadata + pending items (v3.0: contributors, test_delta)
+      plan.md             -- Plan with all changes
+      pending-review.json -- Items awaiting review (v3.0: llm_analysis, affected_files)
+      report.md           -- Execution results
+      metrics.json       -- Iteration metrics (v3.0: test_coverage_delta)
+      alert.json         -- Quality gate alert (if any)
 ```
 
 ---
