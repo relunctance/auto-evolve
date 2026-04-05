@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Auto-Evolve v3.1 — Automated skill iteration manager.
+Auto-Evolve v3.2 — Automated skill iteration manager.
 
-Features (v3.1):
+Features (v3.2):
 - EffectTracker: true before/after effect tracking per iteration
 - CostTracker: LLM call cost tracking with pricing table
 - IssueLinker: auto-close GitHub issues related to committed changes
@@ -118,7 +118,7 @@ DEFAULT_COST_SCORES = {
 
 
 # ===========================================================
-# LLM Pricing (v3.1 CostTracker)
+# LLM Pricing (v3.2 CostTracker)
 # ===========================================================
 
 LLM_PRICING: dict[str, dict[str, float]] = {
@@ -163,7 +163,7 @@ class Repository:
     visibility: str = "public"
     auto_monitor: bool = True
     risk_override: Optional[str] = None
-    scan_interval_hours: int = 168  # v3.1 SmartScheduler
+    scan_interval_hours: int = 168  # v3.2 SmartScheduler
 
     def resolve_path(self) -> Path:
         return Path(self.path).expanduser().resolve()
@@ -247,7 +247,7 @@ class IterationManifest:
     metrics_id: Optional[str] = None
     test_coverage_delta: Optional[float] = None
     contributors: Optional[dict] = None
-    # v3.1
+    # v3.2
     total_cost_usd: Optional[float] = None
     llm_calls: int = 0
 
@@ -287,7 +287,7 @@ class IterationMetrics:
 
 
 # ===========================================================
-# v3.1: EffectTracker
+# v3.2: EffectTracker
 # ===========================================================
 
 class EffectTracker:
@@ -495,7 +495,7 @@ class EffectTracker:
 
 
 # ===========================================================
-# v3.1: CostTracker
+# v3.2: CostTracker
 # ===========================================================
 
 class CostTracker:
@@ -581,7 +581,7 @@ class CostTracker:
 
 
 # ===========================================================
-# v3.1: IssueLinker
+# v3.2: IssueLinker
 # ===========================================================
 
 class IssueLinker:
@@ -701,7 +701,7 @@ class IssueLinker:
 
 
 # ===========================================================
-# v3.1: SmartScheduler
+# v3.2: SmartScheduler
 # ===========================================================
 
 class SmartScheduler:
@@ -835,11 +835,20 @@ class SmartScheduler:
 # ===========================================================
 
 def get_openclaw_llm_config() -> dict:
+    """
+    Read OpenClaw LLM configuration from environment, openclaw CLI, or models.json.
+    Priority: env vars > models.json > openclaw config get llm
+    """
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("MINIMAX_API_KEY", "")
     base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("MINIMAX_BASE_URL", "")
-    model = os.environ.get("OPENAI_MODEL") or "MiniMax-M2"
+    model = os.environ.get("OPENAI_MODEL") or os.environ.get("MINIMAX_MODEL", "MiniMax-M2")
+
+    # Try openclaw config get llm (may not exist in all versions)
     try:
-        result = subprocess.run(["openclaw", "config", "get", "llm"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["openclaw", "config", "get", "llm"],
+            capture_output=True, text=True, timeout=5,
+        )
         if result.returncode == 0:
             cfg = json.loads(result.stdout)
             api_key = api_key or cfg.get("api_key", "")
@@ -847,6 +856,36 @@ def get_openclaw_llm_config() -> dict:
             model = model or cfg.get("model", "MiniMax-M2")
     except Exception:
         pass
+
+    # Fallback: read from agents/main/agent/models.json
+    if not api_key or not base_url:
+        models_file = HOME / ".openclaw" / "agents" / "main" / "agent" / "models.json"
+        if models_file.exists():
+            try:
+                data = json.loads(models_file.read_text())
+                providers = data.get("providers", {})
+                # Try minimax provider first
+                minimax = providers.get("minimax", {})
+                if not api_key:
+                    api_key = minimax.get("apiKey", "")
+                if not base_url:
+                    base_url = minimax.get("baseUrl", "")
+                    if base_url:
+                        # The baseUrl is like https://api.minimaxi.com/anthropic
+                        # The /v1/messages suffix is added by _call_llm_for_refactor
+                        base_url = base_url.rstrip("/")
+                # Also try openai provider
+                if not api_key:
+                    openai = providers.get("openai", {})
+                    api_key = openai.get("apiKey", "")
+                if not base_url:
+                    openai = providers.get("openai", {})
+                    obu = openai.get("baseUrl", "")
+                    if obu:
+                        base_url = obu.rstrip("/") + "/chat/completions"
+            except (json.JSONDecodeError, OSError):
+                pass
+
     return {"api_key": api_key, "base_url": base_url, "model": model}
 
 
@@ -890,6 +929,596 @@ def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> di
             except Exception:
                 pass
         return {"suggestion": result.strip()[:200], "risk_level": "medium", "implementation_hint": "", "available": True}
+
+
+# ===========================================================
+# LLM-Driven Code Optimization (v3.2)
+# Implements true auto-execution of optimization findings.
+# ===========================================================
+
+import tempfile
+import urllib.request
+
+
+def _quality_check(file_path: str, code: str) -> tuple[bool, str]:
+    """
+    Validate that modified code passes syntax check.
+    Writes code to a temp file and runs py_compile.
+    Returns (passed, error_message).
+    """
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=Path(file_path).suffix, delete=False
+        ) as f:
+            f.write(code)
+            tmp_path = f.name
+        result = subprocess.run(
+            ["python3", "-m", "py_compile", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        os.unlink(tmp_path)
+        if result.returncode == 0:
+            return True, ""
+        # Extract meaningful error
+        stderr = result.stderr.strip()
+        if not stderr and result.stdout:
+            stderr = result.stdout.strip()
+        return False, stderr[:300]
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+def _rollback_optimization(repo: Repository, file_path: str, before_hash: str) -> bool:
+    """
+    Rollback a file to its pre-modification state using git.
+    Returns True if rollback succeeded.
+    """
+    try:
+        subprocess.run(
+            ["git", "checkout", before_hash, "--", file_path],
+            cwd=str(repo.resolve_path()),
+            capture_output=True,
+            timeout=10,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _get_file_snapshot(repo: Repository, file_path: str) -> tuple[str, str]:
+    """
+    Get current file content and git hash before modification.
+    Returns (content, git_hash). Empty string hash means file is not in git.
+    """
+    full_path = repo.resolve_path() / file_path
+    try:
+        content = full_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return "", ""
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", file_path],
+            cwd=str(repo.resolve_path()),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        git_hash = result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        git_hash = ""
+    return content, git_hash
+
+
+def _call_llm_for_refactor(
+    prompt: str,
+    system: str,
+    file_ext: str,
+) -> str:
+    """
+    Call LLM to generate code refactor. Returns the refactored code string.
+    Falls back to empty string on failure.
+    """
+    config = get_openclaw_llm_config()
+    if not config.get("api_key") or not config.get("base_url"):
+        return ""
+
+    lang_map = {
+        ".py": "python", ".js": "javascript", ".ts": "typescript",
+        ".go": "go", ".sh": "shell", ".java": "java",
+    }
+    lang = lang_map.get(file_ext.lower(), "text")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + config["api_key"],
+    }
+    messages = (
+        ([{"role": "system", "content": system}] if system else [])
+        + [{"role": "user", "content": prompt}]
+    )
+
+    # Detect API type from base_url
+    base_url = config["base_url"].rstrip("/")
+    if "anthropic" in base_url or config.get("model", "").lower().startswith("minimax"):
+        # Anthropic messages API
+        body = {
+            "model": config.get("model", "MiniMax-M2"),
+            "messages": messages,
+            "max_tokens": 16000,
+            "temperature": 0.2,
+        }
+        endpoint = base_url + "/v1/messages"
+    else:
+        # OpenAI chat completions API
+        body = {
+            "model": config.get("model", "MiniMax-M2"),
+            "messages": messages,
+            "temperature": 0.2,
+        }
+        endpoint = base_url + "/chat/completions"
+
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            # Parse response based on API type
+            if "anthropic" in endpoint:
+                # Anthropic response format: may contain 'thinking' and 'text' blocks
+                # We only want 'text' blocks with actual code content
+                text_blocks = [
+                    b.get("text", "") for b in data.get("content", [])
+                    if b.get("type") == "text" and b.get("text", "").strip()
+                ]
+                # Prefer the longest text block (likely the actual code)
+                content = max(text_blocks, key=len) if text_blocks else ""
+            else:
+                # OpenAI response format
+                content = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+            # Strip markdown code fences if present
+            return _strip_code_fences(content)
+    except urllib.error.HTTPError as e:
+        return ""
+    except Exception:
+        return ""
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip leading/trailing markdown code fences from LLM output."""
+    lines = text.strip().split("\n")
+    # Remove triple-backtick fences
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    content = "\n".join(lines).strip()
+
+    # If content starts with natural language (not code), try to find a code block
+    # This handles cases where LLM returns "Here's the refactored code:" followed by code
+    non_code_starters = (
+        "here", "this", "the", "i", "to", "after", "first", "you",
+        "note", "let", "we", "of", "in", "for", "with", "that",
+        "note:", "here's", "this ", "the function", "the code",
+    )
+    first_word = content.split()[0].lower() if content.split() else ""
+    if first_word in non_code_starters or not first_word:
+        # Try to find a code block pattern: lines that start with valid Python keywords
+        code_indicators = ("def ", "class ", "import ", "from ", "if ", "else:", "return ", "for ", "while ", "async ", "@", "async def")
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if any(stripped.startswith(ind) for ind in code_indicators):
+                return "\n".join(lines[i:]).strip()
+
+    return content
+
+
+def _execute_todo_fixme(
+    code: str,
+    item: dict,
+    repo_path: Path,
+) -> tuple[str, str]:
+    """
+    Handle todo_fixme optimization: use LLM to analyze the TODO/FIXME
+    and either remove it (if trivial), replace with explanation, or flag for manual review.
+    Returns (new_code, result_description).
+    """
+    file_ext = Path(item["file_path"]).suffix
+    lang = {"py": "python", "js": "javascript", "ts": "typescript", "go": "go"}.get(
+        file_ext.lstrip("."), "text"
+    )
+    line_info = f"Line {item['line']}: {item['description']}"
+
+    system = (
+        f"You are a code refactoring assistant. You work with {lang} code only.\n"
+        "Rules:\n"
+        "1. If the TODO/FIXME is trivial (e.g. spelling, formatting, outdated note), remove it.\n"
+        "2. If it references an issue that is already resolved, remove it.\n"
+        "3. If it is a genuine future task, replace the TODO with a brief inline comment explaining status.\n"
+        "4. NEVER fabricate functionality — only clean up existing annotations.\n"
+        "5. Return ONLY the complete modified file content. No markdown fences, no explanations.\n"
+        "6. Preserve all code exactly; only modify the TODO/FIXME lines.\n"
+    )
+    prompt = (
+        f"File: {item['file_path']}\n"
+        f"Issue: {line_info}\n\n"
+        f"Original code:\n```{lang}\n{code}\n```\n\n"
+        "Apply the cleanup rule and return the complete modified file."
+    )
+
+    new_code = _call_llm_for_refactor(prompt, system, file_ext)
+    if not new_code:
+        return "", "LLM call failed or no API key"
+    return new_code, "todo_fixme resolved"
+
+
+def _execute_duplicate_code(
+    code: str,
+    item: dict,
+    repo_path: Path,
+) -> tuple[str, str]:
+    """
+    Handle duplicate_code optimization: use LLM to detect the repeated pattern
+    and refactor by extracting it into a constant or helper function.
+    Returns (new_code, result_description).
+    """
+    file_ext = Path(item["file_path"]).suffix
+    lang = {"py": "python", "js": "javascript", "ts": "typescript", "go": "go"}.get(
+        file_ext.lstrip("."), "text"
+    )
+    desc = item.get("description", "")
+
+    system = (
+        f"You are a code refactoring assistant. You work with {lang} only.\n"
+        "Task: eliminate duplicate code by extracting repeated patterns into constants or helpers.\n"
+        "Rules:\n"
+        "1. Find the duplicate pattern described.\n"
+        "2. Replace repeated occurrences with a constant or small helper function.\n"
+        "3. Preserve all functionality exactly.\n"
+        "4. Return ONLY the complete modified file content. No markdown fences.\n"
+        "5. If the duplication is incidental (not worth extracting), still clean it minimally.\n"
+    )
+    prompt = (
+        f"File: {item['file_path']}\n"
+        f"Finding: {desc}\n\n"
+        f"Current code:\n```{lang}\n{code}\n```\n\n"
+        "Refactor to eliminate duplication. Return complete file."
+    )
+
+    new_code = _call_llm_for_refactor(prompt, system, file_ext)
+    if not new_code:
+        return "", "LLM call failed or no API key"
+    return new_code, "duplicate pattern refactored"
+
+
+def _execute_long_function(
+    code: str,
+    item: dict,
+    repo_path: Path,
+) -> tuple[str, str]:
+    """
+    Handle long_function optimization: use LLM to split a function >100 lines
+    into smaller, focused sub-functions.
+    Returns (new_code, result_description).
+    """
+    file_ext = Path(item["file_path"]).suffix
+    lang = {"py": "python", "js": "javascript", "ts": "typescript", "go": "go"}.get(
+        file_ext.lstrip("."), "text"
+    )
+    desc = item.get("description", "")
+
+    system = (
+        f"You are a code refactoring assistant. You work with {lang} only.\n"
+        "Task: Split an oversized function (>100 lines) into smaller, focused functions.\n"
+        "Rules:\n"
+        "1. Identify logical sections within the function that can be extracted.\n"
+        "2. Create helper functions with clear, descriptive names.\n"
+        "3. Preserve the original function signature and all side effects.\n"
+        "4. Keep the code readable and maintainable.\n"
+        "5. Return ONLY the complete modified file. No markdown fences.\n"
+        "6. Do NOT change any logic — only restructure.\n"
+    )
+    prompt = (
+        f"File: {item['file_path']}\n"
+        f"Finding: {desc}\n\n"
+        f"Current code:\n```{lang}\n{code}\n```\n\n"
+        "Split the long function into smaller functions. Return complete file."
+    )
+
+    new_code = _call_llm_for_refactor(prompt, system, file_ext)
+    if not new_code:
+        return "", "LLM call failed or no API key"
+    return new_code, "long function refactored"
+
+
+def _execute_missing_test(
+    code: str,
+    item: dict,
+    repo_path: Path,
+) -> tuple[str, str]:
+    """
+    Handle missing_test optimization: generate a basic test file for an untested module.
+    Since we can't write a new file from an optimization finding (no file path given),
+    this generates test stubs in a string for manual use or writes to tests/ directory.
+    Returns (generated_test_code, result_description).
+    """
+    desc = item.get("description", "")
+    # missing_test often has file_path="." meaning root-level scan
+    # Generate test stubs based on the module structure
+    file_ext = Path(item.get("file_path", "test.py")).suffix or ".py"
+    lang = {"py": "python"}.get(file_ext.lstrip("."), "python")
+
+    system = (
+        "You are a testing assistant. Generate pytest-compatible test stubs.\n"
+        "Rules:\n"
+        "1. Create a test file with imports matching the module structure.\n"
+        "2. Add placeholder test functions with pass (one per public function).\n"
+        "3. Include basic assert checks where logic is obvious.\n"
+        "4. Return ONLY the complete test file content. No markdown fences.\n"
+    )
+    prompt = (
+        f"Finding: {desc}\n\n"
+        "Generate a test file for the untested modules. "
+        "Use pytest conventions (test_ prefix). Return complete file content."
+    )
+
+    new_code = _call_llm_for_refactor(prompt, system, ".py")
+    if not new_code:
+        return "", "LLM call failed or no API key"
+    return new_code, "test stubs generated"
+
+
+def _execute_outdated_dep(
+    code: str,
+    item: dict,
+    repo_path: Path,
+) -> tuple[str, str]:
+    """
+    Handle outdated_dep optimization: replace pinned version with semver range.
+    Returns (new_code, result_description).
+    """
+    import re as _re
+
+    desc = item.get("description", "")
+    # Extract package name from the line
+    match = _re.search(r"^([a-zA-Z0-9_-]+)[=<>!]+", desc, _re.MULTILINE)
+    if not match:
+        return "", "Could not parse package name"
+
+    new_code = _re.sub(
+        r"([a-zA-Z0-9_-]+)==[\d.]+",
+        r"\1>=1.0.0,<2.0.0",
+        code,
+    )
+    if new_code == code:
+        return "", "No change needed or pattern not matched"
+    return new_code, "pinned dep converted to semver range"
+
+
+def execute_optimization(
+    item: dict,
+    code: str,
+    repo: Repository,
+) -> tuple[str, str]:
+    """
+    Main dispatcher for LLM-driven optimization execution.
+
+    Args:
+        item: Optimization finding dict with keys: type, file_path, line, description, suggestion, risk
+        code: Current file content
+        repo: Repository object
+
+    Returns:
+        (new_code, result_msg). Empty new_code means execution failed or was skipped.
+    """
+    opt_type = item.get("type") or item.get("optimization_type", "")
+
+    if opt_type == "todo_fixme":
+        return _execute_todo_fixme(code, item, repo.resolve_path())
+
+    elif opt_type == "duplicate_code":
+        return _execute_duplicate_code(code, item, repo.resolve_path())
+
+    elif opt_type == "long_function":
+        return _execute_long_function(code, item, repo.resolve_path())
+
+    elif opt_type == "missing_test":
+        return _execute_missing_test(code, item, repo.resolve_path())
+
+    elif opt_type == "outdated_dep":
+        return _execute_outdated_dep(code, item, repo.resolve_path())
+
+    else:
+        return "", f"Unknown optimization type: {opt_type}"
+
+
+@dataclass
+class OptimizationResult:
+    """Result of executing a single optimization."""
+    item_id: int
+    file_path: str
+    opt_type: str
+    success: bool
+    new_code: str = ""
+    result_msg: str = ""
+    before_hash: str = ""
+    quality_passed: bool = False
+    quality_error: str = ""
+
+
+def _auto_execute_optimizations(
+    all_changes: list[ChangeItem],
+    all_opts: list[OptimizationFinding],
+    mode: OperationMode,
+    rules: dict,
+    dry_run: bool,
+) -> tuple[list[ChangeItem], dict]:
+    """
+    Execute optimization findings in full-auto mode using LLM-driven code modification.
+
+    In full-auto mode with rules permitting the risk level, each optimization is:
+      1. Loaded from disk
+      2. Sent to LLM for refactoring
+      3. Validated with py_compile
+      4. Written back to disk on success
+      5. Git-committed
+
+    Returns (executed_change_items, stats_dict).
+    """
+    executed: list[ChangeItem] = []
+    stats: dict = {
+        "total": 0,
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped_llm": 0,
+        "quality_failed": 0,
+        "by_type": {},
+    }
+
+    if mode != OperationMode.FULL_AUTO or dry_run:
+        # In dry-run or non-full-auto, just report what would be executed
+        executable_opts = [
+            c for c in all_changes
+            if c.category == ChangeCategory.OPTIMIZATION
+            and should_auto_execute(rules, c.risk)
+        ]
+        stats["total"] = len(executable_opts)
+        stats["attempted"] = 0
+        if executable_opts:
+            print(f"\n⚡ Full-auto would execute {len(executable_opts)} optimization(s):")
+            for c in executable_opts[:10]:
+                print(f"   [{c.id}] {c.optimization_type}: {c.description[:60]}")
+            if len(executable_opts) > 10:
+                print(f"   ... and {len(executable_opts) - 10} more")
+        return [], stats
+
+    # Full-auto mode: actually execute
+    optimization_changes = [
+        c for c in all_changes
+        if c.category == ChangeCategory.OPTIMIZATION
+        and should_auto_execute(rules, c.risk)
+    ]
+    stats["total"] = len(optimization_changes)
+
+    if not optimization_changes:
+        return [], stats
+
+    print(f"\n⚡ Executing {len(optimization_changes)} optimization(s) in full-auto mode:")
+
+    for change_item in optimization_changes:
+        opt_type = change_item.optimization_type or "unknown"
+        # Track by type
+        stats["by_type"][opt_type] = stats["by_type"].get(opt_type, 0) + 1
+        stats["attempted"] += 1
+
+        repo = Repository(path=change_item.repo_path, type=change_item.repo_type)
+        repo_path = repo.resolve_path()
+        file_path = change_item.file_path
+
+        # Skip directories and non-code files
+        full_path = repo_path / file_path
+        if full_path.is_dir():
+            stats["skipped_llm"] += 1
+            continue
+        ext = Path(file_path).suffix.lower()
+        if ext not in LANGUAGE_EXTENSIONS and ext != ".md":
+            stats["skipped_llm"] += 1
+            continue
+
+        # Load current content
+        try:
+            code = full_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            print(f"  ❌ [{change_item.id}] {file_path}: cannot read file ({e})")
+            stats["failed"] += 1
+            continue
+
+        # Snapshot before modification for rollback
+        _, before_hash = _get_file_snapshot(repo, file_path)
+
+        # Build finding-style dict for execute_optimization
+        finding_dict: dict = {
+            "type": opt_type,
+            "file_path": file_path,
+            "line": 0,
+            "description": change_item.description,
+            "suggestion": "",
+            "risk": change_item.risk.value,
+        }
+
+        # Execute LLM-driven optimization
+        try:
+            new_code, result_msg = execute_optimization(finding_dict, code, repo)
+        except Exception as e:
+            print(f"  ❌ [{change_item.id}] {file_path}: LLM execution error ({e})")
+            stats["failed"] += 1
+            continue
+
+        if not new_code:
+            print(f"  ⏭️  [{change_item.id}] {file_path}: {result_msg or 'no LLM output'}")
+            stats["skipped_llm"] += 1
+            continue
+
+        # Skip if no actual change was made
+        if new_code.strip() == code.strip():
+            print(f"  ⏭️  [{change_item.id}] {file_path}: no change produced")
+            stats["skipped_llm"] += 1
+            continue
+
+        # Quality gate: py_compile check
+        quality_ok, quality_err = _quality_check(file_path, new_code)
+        if not quality_ok:
+            print(f"  ❌ [{change_item.id}] {file_path}: quality gate failed — {quality_err[:80]}")
+            stats["quality_failed"] += 1
+            stats["failed"] += 1
+            continue
+
+        # Write the optimized code back
+        try:
+            full_path.write_text(new_code, encoding="utf-8")
+        except OSError as e:
+            print(f"  ❌ [{change_item.id}] {file_path}: write failed ({e})")
+            # Rollback
+            if before_hash:
+                _rollback_optimization(repo, file_path, before_hash)
+            stats["failed"] += 1
+            continue
+
+        # Git commit (truncate message safely to avoid UTF-8 cutting)
+        commit_msg = f"auto: {opt_type} — {change_item.description}"
+        commit_msg_bytes = commit_msg.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+        try:
+            commit_hash = git_commit(repo, commit_msg_bytes)
+        except Exception as e:
+            print(f"  ❌ [{change_item.id}] {file_path}: git commit failed ({e})")
+            # Rollback on commit failure
+            if before_hash:
+                _rollback_optimization(repo, file_path, before_hash)
+            stats["failed"] += 1
+            continue
+
+        # Success
+        change_item.commit_hash = commit_hash
+        executed.append(change_item)
+        stats["succeeded"] += 1
+        print(f"  ✅ [{change_item.id}] {opt_type} {file_path} ({commit_hash[:7]})")
+
+    # Summary
+    print(
+        f"\n  Optimization execution: {stats['succeeded']}/{stats['attempted']} succeeded "
+        f"(skipped_llm={stats['skipped_llm']}, quality_failed={stats['quality_failed']})"
+    )
+    return executed, stats
 
 
 # ===========================================================
@@ -1422,7 +2051,18 @@ def git_current_branch(repo: Repository) -> str:
 
 def git_commit(repo: Repository, message: str) -> str:
     git_run(repo, "add", ".")
-    git_run(repo, "commit", "-m", message)
+    # Check if there are staged changes before committing
+    status_result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=str(repo.resolve_path()),
+        capture_output=True,
+    )
+    if status_result.returncode != 0:
+        # There are staged changes, commit them
+        git_run(repo, "commit", "-m", message)
+    else:
+        # Nothing to commit, skip
+        pass
     hash_result = git_run(repo, "rev-parse", "--short", "HEAD")
     return hash_result.stdout.strip()
 
@@ -2131,7 +2771,7 @@ def run_llm_analysis_on_changes(
         ctx = f"File: {item.file_path}\nChange type: {item.change_type}\nRisk: {item.risk.value}\nCategory: {item.category.value}"
         result = analyze_with_llm(content, ctx, item.file_path)
 
-        # v3.1: Track LLM call cost
+        # v3.2: Track LLM call cost
         if cost_tracker:
             prompt_tokens = len(ctx + content[:2000]) // 4  # rough estimate
             completion_tokens = len(result.get("suggestion", "")) // 4
@@ -2702,12 +3342,21 @@ def _print_iteration_summary(
     mode: OperationMode,
     auto_exec: list[ChangeItem],
     dry_run: bool,
+    opt_executed: Optional[list[ChangeItem]] = None,
+    opt_stats: Optional[dict] = None,
 ) -> None:
     """Print final iteration summary."""
     print(f"\n📁 Iteration {iteration_id} saved to .iterations/{iteration_id}/")
     print(f"   pending-review.json: {len(pending_items)} items")
     print(f"   metrics.json: todos={metrics.todos_resolved}, files={metrics.files_changed}, "
           f"+{metrics.lines_added}/-{metrics.lines_removed}")
+    if opt_executed:
+        print(f"   ⚡ Optimizations executed: {len(opt_executed)} "
+              f"(via LLM auto-fix, v3.2)")
+        if opt_stats:
+            by_type = opt_stats.get("by_type", {})
+            for ot, cnt in by_type.items():
+                print(f"      - {ot}: {cnt}")
     if cost_summary.get("total_calls", 0) > 0:
         print(f"   💰 LLM cost: ${cost_summary['total_cost_usd']:.6f} "
               f"({cost_summary['total_calls']} calls)")
@@ -2727,7 +3376,7 @@ def cmd_scan(args) -> int:
     rules = get_full_auto_rules(config)
     learnings = load_learnings()
 
-    print("🔍 Auto-Evolve v3.1 Scanner")
+    print("🔍 Auto-Evolve v3.2 Scanner")
     print(f"   Mode: {mode.value}")
     print("=" * 50)
 
@@ -2763,14 +3412,28 @@ def cmd_scan(args) -> int:
     (auto_executed, repos_affected, todos_resolved, iteration_status, remaining_pending) = \
         _auto_execute_changes(auto_exec, rules, pending_sorted, mode, dry_run)
 
+    # Auto-execute LLM-driven optimizations (v3.2)
+    (opt_executed, opt_stats) = _auto_execute_optimizations(
+        all_changes, all_opts, mode, rules, dry_run,
+    )
+
+    # Merge optimization repos into repos_affected
+    for item in opt_executed:
+        repos_affected.add(item.repo_path)
+
+    # Update todos_resolved with optimization todos
+    todos_resolved += sum(
+        1 for item in opt_executed if item.optimization_type == "todo_fixme"
+    )
+
     # Diff stats
     lines_added_total, lines_removed_total, files_changed_total = _compute_diff_stats(repos_affected)
 
     # Pending items display
     _display_remaining_pending(remaining_pending, plan_lines)
 
-    # Push auto-executed
-    if auto_executed and not dry_run:
+    # Push auto-executed (both git changes and LLM optimizations)
+    if (auto_executed or opt_executed) and not dry_run:
         _push_repos(repos_affected)
 
     # Post-scan: costs, effects, issue linking
@@ -2796,9 +3459,10 @@ def cmd_scan(args) -> int:
     contributors = _track_contributors(repos_affected)
 
     # Build manifest and save
+    total_auto = len(auto_executed) + len(opt_executed)
     manifest = _build_scan_manifest(
         iteration_id, iteration_status, duration,
-        len(auto_executed), len(all_opts),
+        total_auto, len(all_opts),
         pending_items, alert, contributors, cost_summary,
     )
     _print_contributors(contributors)
@@ -2808,7 +3472,7 @@ def cmd_scan(args) -> int:
     # Final summary
     _print_iteration_summary(
         iteration_id, pending_items, metrics, cost_summary,
-        mode, auto_exec, dry_run,
+        mode, auto_exec, dry_run, opt_executed, opt_stats,
     )
     return 0
 
@@ -2855,7 +3519,7 @@ def cmd_confirm(args) -> int:
             except Exception as e:
                 print(f"  ❌ [{p['id']}] {p['description'][:60]}: {e}")
 
-    # v3.1: Issue linking after confirm
+    # v3.2: Issue linking after confirm
     if confirmed_count > 0:
         issue_linker = IssueLinker()
         for rp in repos_affected:
@@ -3329,7 +3993,7 @@ def cmd_release(args) -> int:
 
 def cmd_schedule(args) -> int:
     """
-    v3.1: Schedule management with smart scheduling.
+    v3.2: Schedule management with smart scheduling.
     --suggest: Show activity-based scheduling recommendations
     --auto: Apply recommendations to config
     --every: Set interval (creates cron)
@@ -3389,8 +4053,8 @@ def cmd_schedule(args) -> int:
 
     # No subcommand
     print("auto-evolve.py schedule --every HOURS   Set scan interval (creates cron)")
-    print("auto-evolve.py schedule --suggest        Smart scheduling recommendations (v3.1)")
-    print("auto-evolve.py schedule --auto           Apply recommended intervals (v3.1)")
+    print("auto-evolve.py schedule --suggest        Smart scheduling recommendations (v3.2)")
+    print("auto-evolve.py schedule --auto           Apply recommended intervals (v3.2)")
     print("auto-evolve.py schedule --show            Show current schedule")
     print("auto-evolve.py schedule --remove          Remove cron job")
     return 0
@@ -3557,7 +4221,7 @@ def cmd_log(args) -> int:
 
 
 # ===========================================================
-# v3.1: effects command
+# v3.2: effects command
 # ===========================================================
 
 def cmd_effects(args) -> int:
@@ -3603,7 +4267,7 @@ def cmd_effects(args) -> int:
 
 
 # ===========================================================
-# v3.1: costs command
+# v3.2: costs command
 # ===========================================================
 
 def cmd_costs(args) -> int:
@@ -3665,7 +4329,7 @@ def cmd_costs(args) -> int:
 def _build_argument_parser() -> argparse.ArgumentParser:
     """Build and return the root argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
-        description="Auto-Evolve v3.1 — LLM-driven automated skill iteration manager",
+        description="Auto-Evolve v3.2 — LLM-driven automated skill iteration manager",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -3712,11 +4376,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     release_p.add_argument("--version", required=True, dest="version", type=str, help="Version tag (e.g. 2.3.0)")
     release_p.add_argument("--changelog", type=str, default="", help="Changelog / release notes")
 
-    # schedule (v3.1)
+    # schedule (v3.2)
     schedule_p = subparsers.add_parser("schedule", help="Schedule management (cron setup)")
     schedule_p.add_argument("--every", type=int, help="Set scan interval in hours")
-    schedule_p.add_argument("--suggest", action="store_true", help="Smart scheduling recommendations (v3.1)")
-    schedule_p.add_argument("--auto", action="store_true", help="Apply recommended intervals (v3.1)")
+    schedule_p.add_argument("--suggest", action="store_true", help="Smart scheduling recommendations (v3.2)")
+    schedule_p.add_argument("--auto", action="store_true", help="Apply recommended intervals (v3.2)")
     schedule_p.add_argument("--show", action="store_true", help="Show current schedule")
     schedule_p.add_argument("--remove", action="store_true", help="Remove cron job")
 
@@ -3739,13 +4403,13 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     log_p = subparsers.add_parser("log", help="Show iteration log")
     log_p.add_argument("--limit", type=int, default=10, help="Limit entries")
 
-    # effects (v3.1)
-    effects_p = subparsers.add_parser("effects", help="Show effect tracking reports (v3.1)")
+    # effects (v3.2)
+    effects_p = subparsers.add_parser("effects", help="Show effect tracking reports (v3.2)")
     effects_p.add_argument("--iteration", dest="iteration_id", type=str, help="Specific iteration ID")
     effects_p.add_argument("--limit", type=int, default=5, help="Limit iterations shown")
 
-    # costs (v3.1)
-    costs_p = subparsers.add_parser("costs", help="Show LLM cost tracking (v3.1)")
+    # costs (v3.2)
+    costs_p = subparsers.add_parser("costs", help="Show LLM cost tracking (v3.2)")
     costs_p.add_argument("--iteration", dest="iteration_id", type=str, help="Specific iteration ID")
     costs_p.add_argument("--limit", type=int, default=5, help="Limit iterations shown")
 
