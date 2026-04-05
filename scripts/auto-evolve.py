@@ -3115,6 +3115,7 @@ class ProductThinkingFinding:
     suggested_direction: str
     file_path: str
     risk: RiskLevel = RiskLevel.MEDIUM
+    why_now: str = ""
 
 
 class ProductThinkingScanner:
@@ -3133,6 +3134,42 @@ class ProductThinkingScanner:
         self.master_summary = self.memory.get_context_summary()
         self.hawk_prefs = self.memory.get_preferences()
         self.effective_persona = self.memory.context_persona
+        self.learnings = self._load_learnings_context()
+
+    def _load_learnings_context(self) -> str:
+        """Build a context string from learnings history, using current persona's workspace."""
+        try:
+            # Use the persona-aware workspace for learnings
+            learnings_dir = self.memory.workspace / ".learnings"
+            approvals_file = learnings_dir / "approvals.json"
+            rejections_file = learnings_dir / "rejections.json"
+            approvals = []
+            rejections = []
+            if approvals_file.exists():
+                try:
+                    approvals = json.loads(approvals_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            if rejections_file.exists():
+                try:
+                    rejections = json.loads(rejections_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            if not approvals and not rejections:
+                return f"No learnings history yet for {self.effective_persona}."
+            p = self.effective_persona
+            parts = [f"【{p} 学习历史 / Learnings History】"]
+            if rejections:
+                parts.append(f"\n{p} 之前拒绝过的改动（共 {len(rejections)} 次）:")
+                for r in rejections[-5:]:
+                    parts.append(f"  - 拒绝: {r.get('description', '')[:80]} | 原因: {r.get('reason', '未说明')[:60]}")
+            if approvals:
+                parts.append(f"\n{p} 之前批准过的改动（共 {len(approvals)} 次）:")
+                for a in approvals[-5:]:
+                    parts.append(f"  - 批准: {a.get('description', '')[:80]}")
+            return "\n".join(parts)
+        except Exception:
+            return f"No learnings history yet for {self.effective_persona}."
 
     def scan(self) -> list[ProductThinkingFinding]:
         all_findings: list[ProductThinkingFinding] = []
@@ -3183,17 +3220,33 @@ class ProductThinkingScanner:
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
             return None
+        hawk_block = ""
+        if self.hawk_prefs.get("disliked"):
+            hawk_block += "\n\n主人不喜欢的东西（hawk-bridge 记忆）：\n" + "\n".join(f"  - {d}" for d in self.hawk_prefs["disliked"][:3])
+        if self.hawk_prefs.get("liked"):
+            hawk_block += "\n\n主人喜欢的东西（hawk-bridge 记忆）：\n" + "\n".join(f"  - {l}" for l in self.hawk_prefs["liked"][:3])
+        if not hawk_block:
+            hawk_block = "\n\n（无 hawk-bridge 偏好记忆）"
+
         system = (
-            "You are a product reviewer. "
-            "IMPORTANT: The core question you must answer for every file:\n"
-            "\"还有什么不足, 有哪些地方可以优化, 使用体验如何？\"\n"
+            f"You are the CONTINUOUS IMPROVEMENT PARTNER for persona: {self.effective_persona}.\n\n"
+            "IMPORTANT: For EVERY file you analyze, ask from this persona's perspective:\n"
+            "\"还有什么不足, 有哪些地方可以优化, 使用体验如何？\"\n\n"
+            f"【{self.effective_persona} 上下文】\n"
+            f"{self.master_summary}\n"
+            f"【{self.effective_persona} 偏好】\n"
+            f"{hawk_block}\n"
+            "【学习历史】\n"
+            f"{self.learnings}\n\n"
             "Answer ONLY with a JSON object with keys: "
-            "  insight (answer to '还有什么不足, 有哪些地方可以优化, 使用体验如何？' — max 150 chars, honest), "
+            "  insight (answer to the 3 questions above — max 150 chars, honest), "
             "  category (one of: user_complaint | friction_point | unused_feature | competitive_gap | stop_doing | add_feature), "
             "  impact (0.0 to 1.0), "
-            "  evidence (array of 1-2 short text snippets from the content that support this). "
-            "If nothing significant is broken, return {\"insight\": \"\", \"category\": \"ok\", \"impact\": 0.0, \"evidence\": []}. "
-            "Be honest. Focus on what to STOP or FIX, not just what to add."
+            "  evidence (array of 1-2 short text snippets that support this), "
+            "  suggested_direction (one concrete next step, max 100 chars), "
+            "  why_now (why this matters now, max 80 chars). "
+            "If nothing significant is broken, return {\"insight\": \"\", \"category\": \"ok\", \"impact\": 0.0, \"evidence\": [], \"suggested_direction\": \"\", \"why_now\": \"\"}. "
+            "Be honest. Prefer 'stop doing X' over 'add more features'."
         )
         lang = detect_language_from_path(file_path)
         prompt = (
@@ -3224,7 +3277,8 @@ class ProductThinkingScanner:
             category=parsed.get("category", "user_complaint"),
             evidence=parsed.get("evidence", []),
             impact_score=float(parsed.get("impact", 0.5)),
-            suggested_direction="",
+            suggested_direction=parsed.get("suggested_direction", ""),
+            why_now=parsed.get("why_now", ""),
             file_path=file_path,
             risk=RiskLevel.MEDIUM,
         )
@@ -3254,6 +3308,7 @@ class ProductThinkingScanner:
                     evidence=[f"Rejected {count} times: {reason}"],
                     impact_score=min(1.0, count * 0.2),
                     suggested_direction="Review full_auto_rules. This pattern keeps failing.",
+                    why_now="Same rejection reason 3+ times — fix the rule now.",
                     file_path="auto-evolve config",
                     risk=RiskLevel.HIGH,
                 ))
@@ -3268,6 +3323,7 @@ class ProductThinkingScanner:
                     evidence=[f"Rejected {count} times: {desc}"],
                     impact_score=min(1.0, count * 0.25),
                     suggested_direction=f"Add to learnings blocklist.",
+                    why_now=f"Rejected {count}x — wastes resources on unwanted changes.",
                     file_path="auto-evolve learnings",
                     risk=RiskLevel.MEDIUM,
                 ))
@@ -3286,6 +3342,7 @@ class ProductThinkingScanner:
                     evidence=[f"Approved {count} times: {theme}"],
                     impact_score=min(1.0, count * 0.15),
                     suggested_direction="Increase auto-execution of this category",
+                    why_now=f"Approved {count}x — safe to auto-execute more.",
                     file_path="auto-evolve learnings",
                     risk=RiskLevel.LOW,
                 ))
@@ -3316,6 +3373,8 @@ def print_product_findings(findings: list[ProductThinkingFinding]) -> None:
         print(f"     Impact: {impact_bar} {f.impact_score:.1f}")
         if f.suggested_direction:
             print(f"     → {f.suggested_direction}")
+        if f.why_now:
+            print(f"     ⏱ {f.why_now}")
         print(f"     File: {f.file_path}")
     if len(findings) > 10:
         print(f"\n  ... and {len(findings) - 10} more insights")
