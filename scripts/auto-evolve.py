@@ -6517,8 +6517,13 @@ def cmd_learnings(args) -> int:
         if not rejections:
             print("  (none)")
         for r in rejections[: args.limit or 20]:
-            print(f"  [{r.get('date', '?')}] {r.get('repo', '?').split('/')[-1]}")
-            print(f"    {r.get('description', '')}")
+            ts = r.get("timestamp", "")
+            date_str = ts[:10] if ts else "?"
+            repo_name = r.get("repo", "?").split("/")[-1] or "?"
+            desc = r.get("description", "")[:70]
+            print(f"  [{date_str}] {repo_name}")
+            if desc:
+                print(f"    {desc}")
             if r.get("reason"):
                 print(f"    Reason: {r.get('reason', '')}")
             print()
@@ -6530,8 +6535,13 @@ def cmd_learnings(args) -> int:
         if not approvals:
             print("  (none)")
         for a in approvals[: args.limit or 20]:
-            print(f"  [{a.get('date', '?')}] {a.get('repo', '?').split('/')[-1]}")
-            print(f"    {a.get('description', '')}")
+            ts = a.get("timestamp", "")
+            date_str = ts[:10] if ts else "?"
+            repo_name = a.get("repo", "?").split("/")[-1] or "?"
+            desc = a.get("description", "")[:70]
+            print(f"  [{date_str}] {repo_name}")
+            if desc:
+                print(f"    {desc}")
             if a.get("reason"):
                 print(f"    Reason: {a.get('reason', '')}")
             if a.get("approved_by"):
@@ -6568,7 +6578,7 @@ def cmd_trends(args) -> int:
     for repo in targets:
         repo_path = repo.resolve_path()
         history_file = repo_path / ".auto-evolve" / "scan-history.json"
-        print(f"\n{'📁 ' + repo_path.name}")
+        print(f"\n📁 {repo_path.name}")
         print(f"   Path: {repo_path}")
 
         if not history_file.exists():
@@ -6577,7 +6587,7 @@ def cmd_trends(args) -> int:
 
         try:
             data = json.loads(history_file.read_text(encoding="utf-8"))
-            # Find first repo entry
+            # data structure: { repo_path: [scan_round1, scan_round2, ...] }
             scans = None
             for v in data.values():
                 if isinstance(v, list) and len(v) > 0:
@@ -6587,14 +6597,14 @@ def cmd_trends(args) -> int:
                 print(f"   Status: Need at least 2 scans for trend (have {len(scans) if scans else 0})")
                 continue
 
-            # Count findings per scan
+            # Count total findings per scan round
             counts = []
             for scan in scans[:5]:
-                total = sum(len(f) if isinstance(f, list) else 0 for f in scan.values() if isinstance(f, list))
+                total = sum(len(f) for f in scan.values() if isinstance(f, list))
                 counts.append(total)
 
-            counts_reversed = list(reversed(counts))
-            print(f"   Recent scans: {' → '.join(str(c) for c in counts_reversed)}")
+            counts_display = list(reversed(counts))
+            print(f"   Recent scans: {' → '.join(str(c) for c in counts_display)}")
 
             if len(counts) >= 2:
                 delta = counts[0] - counts[1]
@@ -6606,7 +6616,9 @@ def cmd_trends(args) -> int:
                     print(f"   Trend: ➡️  No change")
         except Exception as e:
             print(f"   Error reading history: {e}")
+
     return 0
+
 
 
 def cmd_log(args) -> int:

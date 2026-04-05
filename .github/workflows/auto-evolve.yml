@@ -35,12 +35,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.number }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_REPO_PATH: ${{ github.workspace }}/${{ inputs.target_repo }}
         run: |
-          TARGET=${{ github.event.inputs.target_repo || '.' }}
+          if [ -n "${{ inputs.target_repo }}" ]; then
+            TARGET="${{ github.workspace }}/${{ inputs.target_repo }}"
+          else
+            TARGET="${{ github.workspace }}"
+          fi
           python3 scripts/auto-evolve.py scan --repo "$TARGET" --github-event ${{ github.event_name }}
 
       - name: Scan summary
         if: always()
         run: |
           echo "Scan completed at ${{ github.event_name }}"
-          echo "Results posted as GitHub issue"
