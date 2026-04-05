@@ -54,7 +54,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 # ===========================================================
@@ -1927,6 +1927,76 @@ def run_quality_gates(repo: Repository) -> dict:
 
 
 # ===========================================================
+# Iteration Helpers (DRY: shared patterns across commands)
+# ===========================================================
+
+def _find_target_iteration(
+    catalog: dict,
+    iteration_id: Optional[str],
+    status_filter: Optional[str] = None,
+) -> tuple[Optional[dict], str]:
+    """
+    DRY helper: find a target iteration by ID or latest matching status.
+    Returns (target_iter, iteration_id) or (None, iteration_id) on error.
+    """
+    if not catalog.get("iterations"):
+        print("No iterations found.")
+        return None, ""
+
+    if iteration_id:
+        target_iter = next(
+            (i for i in catalog["iterations"] if i["version"] == iteration_id),
+            None,
+        )
+        if not target_iter:
+            print(f"Iteration {iteration_id} not found.")
+            return None, ""
+    else:
+        if status_filter:
+            target_iter = next(
+                (i for i in catalog["iterations"] if i.get("status") == status_filter),
+                None,
+            )
+            if not target_iter:
+                print(f"No {status_filter} iteration found.")
+                return None, ""
+        else:
+            return None, ""
+
+    return target_iter, target_iter["version"]
+
+
+def _load_iteration_pending(iteration_id: str) -> tuple[Optional[dict], list[dict]]:
+    """DRY helper: load iteration manifest and extract pending items."""
+    try:
+        manifest_data = load_iteration(iteration_id)
+        pending_items = manifest_data.get("items_pending_approval", [])
+        return manifest_data, pending_items
+    except FileNotFoundError:
+        print(f"Iteration {iteration_id} manifest not found.")
+        return None, []
+
+
+def _finalize_iteration_status(
+    iteration_id: str,
+    manifest_data: dict,
+    catalog: dict,
+    status: str,
+    **extra_fields: Any,
+) -> None:
+    """DRY helper: update manifest + catalog and persist both."""
+    manifest_data.update({"status": status, **extra_fields})
+    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(
+        json.dumps(manifest_data, indent=2)
+    )
+    for i, cat_iter in enumerate(catalog["iterations"]):
+        if cat_iter["version"] == iteration_id:
+            catalog["iterations"][i].update({"status": status, **extra_fields})
+            break
+    (ITERATIONS_DIR / "catalog.json").write_text(json.dumps(catalog, indent=2))
+
+
+# ===========================================================
 # Closed-Repo Sanitization
 # ===========================================================
 
@@ -2264,28 +2334,28 @@ def save_pending_review(iteration_id: str, items: list[dict]) -> None:
 # Commands
 # ===========================================================
 
-def cmd_scan(args) -> int:
-    config = load_config()
-    dry_run = args.dry_run
-    mode = get_operation_mode(config)
-    rules = get_full_auto_rules(config)
-    learnings = load_learnings()
+# ===========================================================
+# cmd_scan helpers (reduce function length)
+# ===========================================================
 
-    print("🔍 Auto-Evolve v3.1 Scanner")
-    print(f"   Mode: {mode.value}")
-    print("=" * 50)
-
-    start_time = time.time()
+def _scan_repos(
+    config: dict,
+    args,
+    learnings: dict,
+    before_snapshots: dict[str, dict],
+    cost_tracker: CostTracker,
+    iteration_id: str,
+) -> tuple[list[ChangeItem], list[OptimizationFinding], dict[str, dict], list[Repository], Optional[AlertEntry], dict]:
+    """
+    Scan all configured repositories.
+    Returns (all_changes, all_opts, after_snapshots, repos, alert, qg).
+    """
     repos = config_to_repos(config)
     all_changes: list[ChangeItem] = []
     all_opts: list[OptimizationFinding] = []
-    iteration_id = generate_iteration_id()
-
-    # v3.1: Trackers
-    effect_tracker = EffectTracker()
-    cost_tracker = CostTracker()
-    before_snapshots: dict[str, dict] = {}
     after_snapshots: dict[str, dict] = {}
+    alert: Optional[AlertEntry] = None
+    qg_result: dict = {}
 
     for repo in repos:
         if not repo.auto_monitor:
@@ -2297,23 +2367,22 @@ def cmd_scan(args) -> int:
 
         print(f"\n📦 Scanning: {repo.path} ({repo.type})")
 
-        qg = run_quality_gates(repo)
-        if not qg["passed"]:
-            print(f"  ⚠️  Quality gate failed: {len(qg['syntax_errors'])} syntax error(s)")
+        qg_result = run_quality_gates(repo)
+        if not qg_result["passed"]:
+            print(f"  ⚠️  Quality gate failed: {len(qg_result['syntax_errors'])} syntax error(s)")
             alert = AlertEntry(
                 iteration_id=iteration_id,
                 date=datetime.now(timezone.utc).isoformat(),
                 alert_type="quality_gate_failed",
                 message="Syntax errors detected in repository",
-                details={"errors": qg["syntax_errors"]},
+                details={"errors": qg_result["syntax_errors"]},
             )
         else:
-            alert = None
             print(f"  ✅ Quality gates passed")
 
         changes, opts, _, after_snaps = run_scan(
             repo,
-            dry_run=dry_run,
+            dry_run=args.dry_run,
             learnings=learnings,
             before_snapshots=before_snapshots,
             cost_tracker=cost_tracker,
@@ -2322,87 +2391,25 @@ def cmd_scan(args) -> int:
         all_opts.extend(opts)
         after_snapshots.update(after_snaps)
 
-    duration = time.time() - start_time
+    return all_changes, all_opts, after_snapshots, repos, alert, qg_result
 
-    # Categorize
-    auto_exec = [c for c in all_changes if c.category == ChangeCategory.AUTO_EXEC and c.risk == RiskLevel.LOW]
-    pending = [c for c in all_changes if c.category in (ChangeCategory.PENDING_APPROVAL, ChangeCategory.OPTIMIZATION)]
-    pending_sorted = sort_by_priority(pending)
 
-    print(f"\n📊 Scan Results:")
-    print(f"  Changes detected: {len(all_changes) - len(all_opts)}")
-    print(f"  Optimizations found: {len(all_opts)}")
-    print(f"  Auto-executable:     {len(auto_exec)}")
-    print(f"  Pending review:      {len(pending_sorted)}")
-
-    if pending_sorted:
-        print(f"\n📊 Priority Queue:")
-        for i, c in enumerate(pending_sorted[:10], 1):
-            color = priority_color(c.priority)
-            risk_label = c.risk.value.upper()
-            opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
-            print(f"  [{i}] {color} P={c.priority:.2f} {risk_label}: {c.description[:55]}{opt_badge}")
-        if len(pending_sorted) > 10:
-            print(f"  ... and {len(pending_sorted) - 10} more")
-
-    if auto_exec and not dry_run:
-        print_execution_preview(all_changes, auto_exec, mode, rules)
-
-    plan_lines = [
-        f"# Iteration Plan — {iteration_id}",
-        "",
-        f"**Date:** {datetime.now(timezone.utc).isoformat()}",
-        f"**Mode:** {mode.value}",
-        f"**Repositories:** {len(repos)}",
-        f"**Duration:** {duration:.1f}s",
-        "",
-        "## Changes",
-        "",
-    ]
-
-    report_lines = [
-        f"# Iteration Report — {iteration_id}",
-        "",
-        f"**Date:** {datetime.now(timezone.utc).isoformat()}",
-        f"**Mode:** {mode.value}",
-        f"**Status:** {'dry-run' if dry_run else mode.value}",
-        "",
-        "## Summary",
-        "",
-        f"- Changes detected: {len(all_changes) - len(all_opts)}",
-        f"- Optimizations found: {len(all_opts)}",
-        f"- Pending review: {len(pending_sorted)}",
-        "",
-    ]
-
-    pending_items: list[dict] = []
-    for c in pending_sorted:
-        repo_obj = Repository(path=c.repo_path, type=c.repo_type)
-        item: dict = {
-            "id": c.id,
-            "description": c.description,
-            "file_path": c.file_path,
-            "risk": c.risk.value,
-            "category": c.category.value,
-            "repo_path": c.repo_path,
-            "optimization_type": c.optimization_type,
-            "priority": c.priority,
-            "value_score": c.value_score,
-            "risk_score": c.risk_score,
-            "cost_score": c.cost_score,
-        }
-        if repo_obj.is_closed():
-            item = sanitize_pending_item(item, repo_obj)
-        pending_items.append(item)
-
+def _auto_execute_changes(
+    auto_exec: list[ChangeItem],
+    rules: dict,
+    pending_sorted: list[ChangeItem],
+    mode: OperationMode,
+    dry_run: bool,
+) -> tuple[list[ChangeItem], set[str], int, str, list[ChangeItem]]:
+    """
+    Execute auto-approved low-risk changes in full-auto mode.
+    Returns (auto_executed, repos_affected, todos_resolved, iteration_status, remaining_pending).
+    """
     auto_executed: list[ChangeItem] = []
-    iteration_status = "dry-run" if dry_run else mode.value
     repos_affected: set[str] = set()
-    lines_added_total = 0
-    lines_removed_total = 0
-    files_changed_total = 0
     todos_resolved = 0
-    changed_files_all: list[str] = []
+    remaining_pending: list[ChangeItem] = []
+    iteration_status = "dry-run" if dry_run else mode.value
 
     if mode == OperationMode.FULL_AUTO and not dry_run:
         for change in auto_exec:
@@ -2431,16 +2438,38 @@ def cmd_scan(args) -> int:
     else:
         remaining_pending = auto_exec + pending_sorted
 
-    # Compute diff stats
-    for rp in repos_affected:
-        repo_obj = Repository(path=rp, type="skill")
-        la, lr = git_diff_lines_added_removed(repo_obj)
-        lines_added_total += la
-        lines_removed_total += lr
-        files_changed_total += len(git_status(repo_obj))
-        changed_files_all.extend([g["file"] for g in git_status(repo_obj)])
+    return auto_executed, repos_affected, todos_resolved, iteration_status, remaining_pending
 
-    # Pending items display
+
+def _build_pending_items(pending_sorted: list[ChangeItem]) -> tuple[list[dict], list[str]]:
+    """Convert sorted pending ChangeItems to dicts and plan_lines."""
+    pending_items: list[dict] = []
+    for c in pending_sorted:
+        repo_obj = Repository(path=c.repo_path, type=c.repo_type)
+        item: dict = {
+            "id": c.id,
+            "description": c.description,
+            "file_path": c.file_path,
+            "risk": c.risk.value,
+            "category": c.category.value,
+            "repo_path": c.repo_path,
+            "optimization_type": c.optimization_type,
+            "priority": c.priority,
+            "value_score": c.value_score,
+            "risk_score": c.risk_score,
+            "cost_score": c.cost_score,
+        }
+        if repo_obj.is_closed():
+            item = sanitize_pending_item(item, repo_obj)
+        pending_items.append(item)
+    return pending_items, []
+
+
+def _display_remaining_pending(
+    remaining_pending: list[ChangeItem],
+    plan_lines: list[str],
+) -> None:
+    """Print remaining pending items and extend plan_lines."""
     if remaining_pending:
         display_items = remaining_pending[:20]
         print(f"\n📋 Pending Items ({len(remaining_pending)}):")
@@ -2454,21 +2483,73 @@ def cmd_scan(args) -> int:
         for i, c in enumerate(remaining_pending, 1):
             plan_lines.append(f"- [{i}] **{c.risk.value.upper()}** P={c.priority:.2f} {c.description}")
 
-    # Push auto-executed
-    if auto_executed and not dry_run:
-        for rp in repos_affected:
-            repo_obj = Repository(path=rp, type="skill")
-            try:
-                git_push(repo_obj)
-                print(f"  📤 Pushed to remote")
-            except Exception as e:
-                print(f"  ⚠️  Push failed: {e}")
 
-    # v3.1: Flush LLM costs and compute effect
+def _push_repos(repos_affected: set[str]) -> None:
+    """Push all affected repos to remote."""
+    for rp in repos_affected:
+        repo_obj = Repository(path=rp, type="skill")
+        try:
+            git_push(repo_obj)
+            print(f"  📤 Pushed to remote")
+        except Exception as e:
+            print(f"  ⚠️  Push failed: {e}")
+
+
+def _build_pending_items_with_plan(
+    pending_sorted: list[ChangeItem],
+    plan_lines: list[str],
+) -> tuple[list[dict], list[str]]:
+    """Convert pending ChangeItems to dicts and append to plan_lines."""
+    pending_items: list[dict] = []
+    for c in pending_sorted:
+        repo_obj = Repository(path=c.repo_path, type=c.repo_type)
+        item: dict = {
+            "id": c.id,
+            "description": c.description,
+            "file_path": c.file_path,
+            "risk": c.risk.value,
+            "category": c.category.value,
+            "repo_path": c.repo_path,
+            "optimization_type": c.optimization_type,
+            "priority": c.priority,
+            "value_score": c.value_score,
+            "risk_score": c.risk_score,
+            "cost_score": c.cost_score,
+        }
+        if repo_obj.is_closed():
+            item = sanitize_pending_item(item, repo_obj)
+        pending_items.append(item)
+    return pending_items, plan_lines
+
+
+def _compute_diff_stats(repos_affected: set[str]) -> tuple[int, int, int]:
+    """Compute lines added/removed and files changed across repos."""
+    lines_added_total = lines_removed_total = files_changed_total = 0
+    for rp in repos_affected:
+        repo_obj = Repository(path=rp, type="skill")
+        la, lr = git_diff_lines_added_removed(repo_obj)
+        lines_added_total += la
+        lines_removed_total += lr
+        files_changed_total += len(git_status(repo_obj))
+    return lines_added_total, lines_removed_total, files_changed_total
+
+
+def _post_scan_cleanup(
+    cost_tracker: CostTracker,
+    iteration_id: str,
+    effect_tracker: EffectTracker,
+    before_snapshots: dict[str, dict],
+    after_snapshots: dict[str, dict],
+    auto_executed: list[ChangeItem],
+    remaining_pending: list[ChangeItem],
+    todos_resolved: int,
+    qg: dict,
+    repos_affected: set[str],
+) -> dict:
+    """Flush LLM costs, compute effects, link issues. Returns cost_summary."""
     cost_tracker.flush_calls(iteration_id)
     cost_summary = cost_tracker.get_iteration_cost(iteration_id)
 
-    # v3.1: Effect tracking
     if before_snapshots and after_snapshots and (auto_executed or remaining_pending):
         effect_report = effect_tracker.track_iteration_effect(
             iteration_id=iteration_id,
@@ -2476,13 +2557,12 @@ def cmd_scan(args) -> int:
             after_snapshots=after_snapshots,
             todos_resolved=todos_resolved,
             lint_errors_fixed=qg.get("lint_errors_fixed", 0),
-            coverage_delta=0.0,  # Would need test comparison to get actual delta
+            coverage_delta=0.0,
         )
         verdict_icon = {"positive": "✅", "neutral": "➖", "negative": "❌"}.get(effect_report["verdict"], "➖")
         print(f"\n  {verdict_icon} Effect: {effect_report['summary']}")
 
-    # v3.1: Issue linking for committed changes
-    if auto_executed and not dry_run:
+    if auto_executed:
         issue_linker = IssueLinker()
         for rp in repos_affected:
             repo_path = Path(rp)
@@ -2492,7 +2572,216 @@ def cmd_scan(args) -> int:
                 if close_result["found"] > 0:
                     print(f"\n  🔗 IssueLinker: found {close_result['found']} related issue(s), closed {close_result['closed']}")
 
-    # Generate and save metrics
+    return cost_summary
+
+
+def _print_scan_summary(
+    all_changes: list[ChangeItem],
+    all_opts: list[OptimizationFinding],
+    auto_exec: list[ChangeItem],
+    pending_sorted: list[ChangeItem],
+    mode: OperationMode,
+    dry_run: bool,
+    rules: dict,
+) -> None:
+    """Print scan result summary and priority queue."""
+    print(f"\n📊 Scan Results:")
+    print(f"  Changes detected: {len(all_changes) - len(all_opts)}")
+    print(f"  Optimizations found: {len(all_opts)}")
+    print(f"  Auto-executable:     {len(auto_exec)}")
+    print(f"  Pending review:      {len(pending_sorted)}")
+
+    if pending_sorted:
+        print(f"\n📊 Priority Queue:")
+        for i, c in enumerate(pending_sorted[:10], 1):
+            color = priority_color(c.priority)
+            risk_label = c.risk.value.upper()
+            opt_badge = " [opt]" if c.category == ChangeCategory.OPTIMIZATION else ""
+            print(f"  [{i}] {color} P={c.priority:.2f} {risk_label}: {c.description[:55]}{opt_badge}")
+        if len(pending_sorted) > 10:
+            print(f"  ... and {len(pending_sorted) - 10} more")
+
+    if auto_exec and not dry_run:
+        print_execution_preview(all_changes, auto_exec, mode, rules)
+
+
+def _build_plan_and_report(
+    iteration_id: str,
+    mode: OperationMode,
+    dry_run: bool,
+    repos: list[Repository],
+    duration: float,
+    all_changes: list[ChangeItem],
+    all_opts: list[OptimizationFinding],
+    pending_sorted: list[ChangeItem],
+) -> tuple[list[str], list[str], list[dict]]:
+    """Build plan_lines, report_lines, and pending_items from scan results."""
+    plan_lines = [
+        f"# Iteration Plan — {iteration_id}",
+        "",
+        f"**Date:** {datetime.now(timezone.utc).isoformat()}",
+        f"**Mode:** {mode.value}",
+        f"**Repositories:** {len(repos)}",
+        f"**Duration:** {duration:.1f}s",
+        "",
+        "## Changes",
+        "",
+    ]
+    report_lines = [
+        f"# Iteration Report — {iteration_id}",
+        "",
+        f"**Date:** {datetime.now(timezone.utc).isoformat()}",
+        f"**Mode:** {mode.value}",
+        f"**Status:** {'dry-run' if dry_run else mode.value}",
+        "",
+        "## Summary",
+        "",
+        f"- Changes detected: {len(all_changes) - len(all_opts)}",
+        f"- Optimizations found: {len(all_opts)}",
+        f"- Pending review: {len(pending_sorted)}",
+        "",
+    ]
+    pending_items, plan_lines = _build_pending_items_with_plan(pending_sorted, plan_lines)
+    return plan_lines, report_lines, pending_items
+
+
+def _track_contributors(repos_affected: set[str]) -> dict:
+    """Collect contributor stats for all affected repos."""
+    contributors: dict = {}
+    for rp in repos_affected:
+        repo_obj = Repository(path=rp, type="skill")
+        contributors[rp] = track_contributors(repo_obj)
+    return contributors
+
+
+def _build_scan_manifest(
+    iteration_id: str,
+    iteration_status: str,
+    duration: float,
+    num_auto: int,
+    num_opts: int,
+    pending_items: list[dict],
+    alert: Optional[AlertEntry],
+    contributors: dict,
+    cost_summary: dict,
+) -> IterationManifest:
+    """Build and return the IterationManifest for a scan iteration."""
+    return IterationManifest(
+        version=iteration_id,
+        date=datetime.now(timezone.utc).isoformat(),
+        status=iteration_status,
+        risk_level="mixed",
+        items_auto=num_auto,
+        items_approved=0,
+        items_rejected=0,
+        items_optimization=num_opts,
+        duration_seconds=round(duration, 1),
+        items_pending_approval=pending_items,
+        has_alert=alert is not None,
+        metrics_id=iteration_id,
+        test_coverage_delta=None,
+        contributors=contributors,
+        total_cost_usd=cost_summary.get("total_cost_usd"),
+        llm_calls=cost_summary.get("total_calls", 0),
+    )
+
+
+def _print_contributors(contributors: dict) -> None:
+    """Print contributor stats."""
+    for rp, contrib in contributors.items():
+        rn = Path(rp).name
+        print(f"   [C] {rn}: {contrib['auto_commits']} auto / "
+              f"{contrib['manual_commits']} manual ({contrib['auto_percentage']}% auto)")
+
+
+def _print_iteration_summary(
+    iteration_id: str,
+    pending_items: list[dict],
+    metrics,
+    cost_summary: dict,
+    mode: OperationMode,
+    auto_exec: list[ChangeItem],
+    dry_run: bool,
+) -> None:
+    """Print final iteration summary."""
+    print(f"\n📁 Iteration {iteration_id} saved to .iterations/{iteration_id}/")
+    print(f"   pending-review.json: {len(pending_items)} items")
+    print(f"   metrics.json: todos={metrics.todos_resolved}, files={metrics.files_changed}, "
+          f"+{metrics.lines_added}/-{metrics.lines_removed}")
+    if cost_summary.get("total_calls", 0) > 0:
+        print(f"   💰 LLM cost: ${cost_summary['total_cost_usd']:.6f} "
+              f"({cost_summary['total_calls']} calls)")
+
+    if mode == OperationMode.SEMI_AUTO and auto_exec and not dry_run:
+        print(f"\n   Confirm with: auto-evolve.py confirm")
+
+    if dry_run:
+        print("\n⚠️  Dry-run mode — no changes committed")
+
+
+def cmd_scan(args) -> int:
+    """Scan all configured repositories and produce an iteration."""
+    config = load_config()
+    dry_run = args.dry_run
+    mode = get_operation_mode(config)
+    rules = get_full_auto_rules(config)
+    learnings = load_learnings()
+
+    print("🔍 Auto-Evolve v3.1 Scanner")
+    print(f"   Mode: {mode.value}")
+    print("=" * 50)
+
+    start_time = time.time()
+    iteration_id = generate_iteration_id()
+
+    # Trackers
+    effect_tracker = EffectTracker()
+    cost_tracker = CostTracker()
+    before_snapshots: dict[str, dict] = {}
+
+    # Scan repos
+    all_changes, all_opts, after_snapshots, repos, alert, qg = _scan_repos(
+        config, args, learnings, before_snapshots, cost_tracker, iteration_id,
+    )
+    duration = time.time() - start_time
+
+    # Categorize changes
+    auto_exec = [c for c in all_changes if c.category == ChangeCategory.AUTO_EXEC and c.risk == RiskLevel.LOW]
+    pending = [c for c in all_changes if c.category in (ChangeCategory.PENDING_APPROVAL, ChangeCategory.OPTIMIZATION)]
+    pending_sorted = sort_by_priority(pending)
+
+    # Print scan summary and priority queue
+    _print_scan_summary(all_changes, all_opts, auto_exec, pending_sorted, mode, dry_run, rules)
+
+    # Build plan and report lines
+    plan_lines, report_lines, pending_items = _build_plan_and_report(
+        iteration_id, mode, dry_run, repos, duration,
+        all_changes, all_opts, pending_sorted,
+    )
+
+    # Auto-execute changes
+    (auto_executed, repos_affected, todos_resolved, iteration_status, remaining_pending) = \
+        _auto_execute_changes(auto_exec, rules, pending_sorted, mode, dry_run)
+
+    # Diff stats
+    lines_added_total, lines_removed_total, files_changed_total = _compute_diff_stats(repos_affected)
+
+    # Pending items display
+    _display_remaining_pending(remaining_pending, plan_lines)
+
+    # Push auto-executed
+    if auto_executed and not dry_run:
+        _push_repos(repos_affected)
+
+    # Post-scan: costs, effects, issue linking
+    cost_summary = _post_scan_cleanup(
+        cost_tracker, iteration_id, effect_tracker,
+        before_snapshots, after_snapshots,
+        auto_executed, remaining_pending,
+        todos_resolved, qg, repos_affected,
+    )
+
+    # Metrics and contributors
     quality_passed = alert is None
     metrics = generate_metrics(
         iteration_id=iteration_id,
@@ -2504,85 +2793,38 @@ def cmd_scan(args) -> int:
         quality_gate_passed=quality_passed,
     )
     save_metrics(metrics)
+    contributors = _track_contributors(repos_affected)
 
-    # Contributor tracking
-    contributors: dict = {}
-    for rp in repos_affected:
-        repo_obj = Repository(path=rp, type="skill")
-        contributors[rp] = track_contributors(repo_obj)
-
-    # Build manifest
-    manifest = IterationManifest(
-        version=iteration_id,
-        date=datetime.now(timezone.utc).isoformat(),
-        status=iteration_status,
-        risk_level="mixed",
-        items_auto=len(auto_executed),
-        items_approved=0,
-        items_rejected=0,
-        items_optimization=len(all_opts),
-        duration_seconds=round(duration, 1),
-        items_pending_approval=pending_items,
-        has_alert=alert is not None,
-        metrics_id=iteration_id,
-        test_coverage_delta=None,
-        contributors=contributors,
-        total_cost_usd=cost_summary.get("total_cost_usd"),
-        llm_calls=cost_summary.get("total_calls", 0),
+    # Build manifest and save
+    manifest = _build_scan_manifest(
+        iteration_id, iteration_status, duration,
+        len(auto_executed), len(all_opts),
+        pending_items, alert, contributors, cost_summary,
     )
-
-    if contributors:
-        for rp, contrib in contributors.items():
-            rn = Path(rp).name
-            print(f"   [C] {rn}: {contrib['auto_commits']} auto / {contrib['manual_commits']} manual ({contrib['auto_percentage']}% auto)")
-
+    _print_contributors(contributors)
     save_iteration(iteration_id, manifest, plan_lines, pending_items, report_lines, alert)
     update_catalog(manifest)
 
-    print(f"\n📁 Iteration {iteration_id} saved to .iterations/{iteration_id}/")
-    print(f"   pending-review.json: {len(pending_items)} items")
-    print(f"   metrics.json: todos={metrics.todos_resolved}, files={metrics.files_changed}, +{metrics.lines_added}/-{metrics.lines_removed}")
-    if cost_summary.get("total_calls", 0) > 0:
-        print(f"   💰 LLM cost: ${cost_summary['total_cost_usd']:.6f} ({cost_summary['total_calls']} calls)")
-
-    if mode == OperationMode.SEMI_AUTO and auto_exec and not dry_run:
-        print(f"\n   Confirm with: auto-evolve.py confirm")
-
-    if dry_run:
-        print("\n⚠️  Dry-run mode — no changes committed")
-
+    # Final summary
+    _print_iteration_summary(
+        iteration_id, pending_items, metrics, cost_summary,
+        mode, auto_exec, dry_run,
+    )
     return 0
 
 
 def cmd_confirm(args) -> int:
-    config = load_config()
-    iteration_id = args.iteration_id
-
+    """Confirm pending changes from a semi-auto scan iteration."""
     catalog = load_catalog()
-    if not catalog["iterations"]:
-        print("No iterations found.")
+    target_iter, iteration_id = _find_target_iteration(
+        catalog, args.iteration_id, status_filter="pending-approval",
+    )
+    if not iteration_id:
         return 1
 
-    if iteration_id:
-        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
-        if not target_iter:
-            print(f"Iteration {iteration_id} not found.")
-            return 1
-    else:
-        target_iter = next((i for i in catalog["iterations"] if i["status"] == "pending-approval"), None)
-        if not target_iter:
-            print("No pending-approval iteration found.")
-            return 1
-
-    iteration_id = target_iter["version"]
-
-    try:
-        manifest_data = load_iteration(iteration_id)
-        pending_items = manifest_data.get("items_pending_approval", [])
-    except FileNotFoundError:
-        print(f"Iteration {iteration_id} manifest not found.")
+    manifest_data, pending_items = _load_iteration_pending(iteration_id)
+    if manifest_data is None:
         return 1
-
     if not pending_items:
         print(f"No pending items in iteration {iteration_id}.")
         return 0
@@ -2599,8 +2841,7 @@ def cmd_confirm(args) -> int:
         repo_items = [p for p in pending_items if p.get("repo_path") == rp]
         for p in repo_items:
             try:
-                commit_msg = f"auto-evolve: {p['description']}"
-                commit_hash = git_commit(repo_obj, commit_msg)
+                commit_hash = git_commit(repo_obj, f"auto-evolve: {p['description']}")
                 print(f"  ✅ [{p['id']}] {p['description'][:60]} ({commit_hash})")
                 confirmed_count += 1
                 add_learning(
@@ -2632,149 +2873,160 @@ def cmd_confirm(args) -> int:
         except Exception as e:
             print(f"  ⚠️  Push failed for {rp}: {e}")
 
-    manifest_data["items_approved"] = confirmed_count
-    manifest_data["status"] = "completed"
-    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
-
-    for i, cat_iter in enumerate(catalog["iterations"]):
-        if cat_iter["version"] == iteration_id:
-            catalog["iterations"][i]["status"] = "completed"
-            catalog["iterations"][i]["items_approved"] = confirmed_count
-
-    (ITERATIONS_DIR / "catalog.json").write_text(json.dumps(catalog, indent=2))
-
+    _finalize_iteration_status(
+        iteration_id, manifest_data, catalog,
+        "completed", items_approved=confirmed_count,
+    )
     print(f"\n✅ Confirmed and executed {confirmed_count} items")
     return 0
 
 
 def cmd_reject(args) -> int:
-    change_id = args.id
-    reason = args.reason
-    iteration_id = args.iteration_id
-
+    """Reject a specific pending change and record it in learnings."""
     catalog = load_catalog()
-
-    if iteration_id:
-        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
-        if not target_iter:
-            print(f"Iteration {iteration_id} not found.")
-            return 1
-    else:
-        target_iter = next((i for i in catalog["iterations"] if i["status"] == "pending-approval"), None)
-        if not target_iter:
-            print("No pending-approval iteration found.")
-            return 1
-
-    iteration_id = target_iter["version"]
-
-    try:
-        manifest_data = load_iteration(iteration_id)
-        pending_items = manifest_data.get("items_pending_approval", [])
-    except FileNotFoundError:
-        print(f"Iteration {iteration_id} manifest not found.")
+    target_iter, iteration_id = _find_target_iteration(
+        catalog, args.iteration_id, status_filter="pending-approval",
+    )
+    if not iteration_id:
         return 1
 
-    item = next((p for p in pending_items if p.get("id") == change_id), None)
+    manifest_data, pending_items = _load_iteration_pending(iteration_id)
+    if manifest_data is None:
+        return 1
+
+    item = next((p for p in pending_items if p.get("id") == args.id), None)
     if not item:
-        print(f"Item {change_id} not found in pending items.")
+        print(f"Item {args.id} not found in pending items.")
         return 1
 
     add_learning(
         learning_type="rejection",
-        change_id=str(change_id),
+        change_id=str(args.id),
         description=item["description"],
-        reason=reason,
+        reason=args.reason,
         repo=item.get("repo_path", ""),
     )
 
-    pending_items = [p for p in pending_items if p.get("id") != change_id]
-    save_pending_review(iteration_id, pending_items)
+    remaining = [p for p in pending_items if p.get("id") != args.id]
+    save_pending_review(iteration_id, remaining)
 
-    manifest_data["items_pending_approval"] = pending_items
+    manifest_data["items_pending_approval"] = remaining
     manifest_data["items_rejected"] = manifest_data.get("items_rejected", 0) + 1
-    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
+    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(
+        json.dumps(manifest_data, indent=2),
+    )
 
-    print(f"❌ Rejected item {change_id}: {item['description'][:60]}")
-    if reason:
-        print(f"   Reason: {reason}")
+    print(f"❌ Rejected item {args.id}: {item['description'][:60]}")
+    if args.reason:
+        print(f"   Reason: {args.reason}")
     print(f"   Recorded in .learnings/rejections.json")
 
     return 0
 
 
 def cmd_approve(args) -> int:
-    config = load_config()
-    iteration_id = args.iteration_id
-    approve_all = args.all
-    approval_reason: Optional[str] = getattr(args, "reason", None)
-
+    """Approve and execute pending changes (supports --all, --ids, or interactive)."""
     catalog = load_catalog()
-    if not catalog["iterations"]:
-        print("No iterations found.")
-        return 1
-
-    if iteration_id:
-        target_iter = next((i for i in catalog["iterations"] if i["version"] == iteration_id), None)
-        if not target_iter:
-            print(f"Iteration {iteration_id} not found.")
-            return 1
-    else:
-        target_iter = next(
-            (i for i in catalog["iterations"] if i["status"] in ("pending-approval", "full-auto-completed")),
-            None,
+    target_iter, iteration_id = _find_target_iteration(
+        catalog, args.iteration_id,
+        status_filter="pending-approval",
+    )
+    if not iteration_id:
+        # Fallback: also check full-auto-completed
+        catalog = load_catalog()
+        target_iter, iteration_id = _find_target_iteration(
+            catalog, args.iteration_id,
+            status_filter="full-auto-completed",
         )
-        if not target_iter:
-            print("No pending iteration found.")
+        if not iteration_id:
             return 1
 
-    iteration_id = target_iter["version"]
-
-    try:
-        manifest_data = load_iteration(iteration_id)
-        pending_items = manifest_data.get("items_pending_approval", [])
-    except FileNotFoundError:
-        print(f"Iteration {iteration_id} manifest not found.")
+    manifest_data, pending_items = _load_iteration_pending(iteration_id)
+    if manifest_data is None:
         return 1
-
     if not pending_items:
         print(f"No pending items in iteration {iteration_id}.")
         return 0
 
-    if approve_all:
-        approved_ids = [p["id"] for p in pending_items]
-        print(f"✅ Approving all {len(approved_ids)} pending items...")
-        if approval_reason:
-            print(f"   Reason: {approval_reason}")
-    else:
-        ids_str = getattr(args, "ids", None)
-        if ids_str:
-            try:
-                approved_ids = [int(x.strip()) for x in str(ids_str).split(",") if x.strip()]
-            except ValueError:
-                print("Invalid IDs. Use: approve 1,2,3")
-                return 1
-        else:
-            print(f"Iteration: {iteration_id}")
-            print(f"Pending items ({len(pending_items)}):")
-            for p in pending_items:
-                risk_icon = RISK_COLORS.get(p.get("risk", "medium"), "⚪")
-                pri = p.get("priority", 0)
-                llm_b = " [LLM]" if p.get("llm_suggestion") else ""
-                dep_b = " [!]" + str(len(p.get("affected_files", []))) + "deps" if p.get("affected_files") else ""
-                print(f"  [{p['id']}] {risk_icon} P={pri:.2f} {p.get('risk', '?').upper()} {p.get('description', '')[:55]}{llm_b}{dep_b}")
-            print("\nRun: auto-evolve.py approve --all [--reason 'your reason']")
-            print("Or:  auto-evolve.py approve 1,3 [--reason 'your reason']")
-            return 0
+    # Resolve which IDs to approve
+    approved_ids = _resolve_approved_ids(args, pending_items)
+    if approved_ids is None:
+        return 0  # Interactive listing was shown
 
+    # Batch merge check for high-risk
     changes_for_pr = [p for p in pending_items if p["id"] in approved_ids and p.get("risk") == "high"]
     if len(changes_for_pr) >= 3 and should_merge_prs(changes_for_pr):
         print(f"\n📦 Batch-merging {len(changes_for_pr)} high-risk changes into single PR...")
         groups = group_similar_changes(changes_for_pr)
         print(f"   Created {len(groups)} change group(s)")
 
+    # Execute approvals
+    approved_count, repos_affected = _execute_approved_items(
+        pending_items, approved_ids, iteration_id, args,
+    )
+
+    # Push
+    if approved_count > 0:
+        _push_repos(repos_affected)
+
+    _finalize_iteration_status(
+        iteration_id, manifest_data, catalog,
+        "completed", items_approved=approved_count,
+    )
+    print(f"\n✅ Approved and executed {approved_count} items")
+    return 0
+
+
+def _resolve_approved_ids(
+    args,
+    pending_items: list[dict],
+) -> Optional[list[int]]:
+    """Resolve which item IDs to approve. Returns None if displaying interactive list."""
+    if args.all:
+        approved_ids = [p["id"] for p in pending_items]
+        reason = getattr(args, "reason", None)
+        print(f"✅ Approving all {len(approved_ids)} pending items...")
+        if reason:
+            print(f"   Reason: {reason}")
+        return approved_ids
+
+    ids_str = getattr(args, "ids", None)
+    if ids_str:
+        try:
+            return [int(x.strip()) for x in str(ids_str).split(",") if x.strip()]
+        except ValueError:
+            print("Invalid IDs. Use: approve 1,2,3")
+            return None
+
+    # Interactive listing
+    iteration_id = getattr(args, "iteration_id", None)
+    print(f"Iteration: {iteration_id}")
+    print(f"Pending items ({len(pending_items)}):")
+    for p in pending_items:
+        risk_icon = RISK_COLORS.get(p.get("risk", "medium"), "⚪")
+        pri = p.get("priority", 0)
+        llm_b = " [LLM]" if p.get("llm_suggestion") else ""
+        dep_b = ""
+        if p.get("affected_files"):
+            dep_b = f" [!]{len(p['affected_files'])}deps"
+        print(f"  [{p['id']}] {risk_icon} P={pri:.2f} {p.get('risk', '?').upper()} "
+              f"{p.get('description', '')[:55]}{llm_b}{dep_b}")
+    print("\nRun: auto-evolve.py approve --all [--reason 'your reason']")
+    print("Or:  auto-evolve.py approve 1,3 [--reason 'your reason']")
+    return None
+
+
+def _execute_approved_items(
+    pending_items: list[dict],
+    approved_ids: list[int],
+    iteration_id: str,
+    args,
+) -> tuple[int, set[str]]:
+    """Execute approved items. Returns (approved_count, repos_affected)."""
     approved_count = 0
     repos_affected: set[str] = set()
     issue_linker = IssueLinker()
+    approval_reason = getattr(args, "reason", None)
 
     for p in pending_items:
         if p["id"] not in approved_ids:
@@ -2786,36 +3038,7 @@ def cmd_approve(args) -> int:
             continue
 
         if p.get("risk") == "high":
-            print(f"\n🔴 High-risk: {p['description'][:60]}")
-            print(f"  Creating branch and PR...")
-            branch = create_branch_for_change(repo_obj, p["description"][:50])
-            conflict_result = handle_pr_conflict(repo_obj, branch)
-            try:
-                commit_hash = git_commit(repo_obj, f"auto-evolve: {p['description']}")
-                pr_body = f"## auto-evolve: {p['description']}\n\n### Changes\n\n- {p['description']}"
-                pr_url = create_pr(
-                    repo_obj, branch,
-                    p["description"],
-                    [ChangeItem(
-                        id=p["id"],
-                        description=p["description"],
-                        file_path=p["file_path"],
-                        change_type="approved",
-                        risk=RiskLevel.HIGH,
-                        category=ChangeCategory.PENDING_APPROVAL,
-                        repo_path=repo_obj.path,
-                    )],
-                    extra_body=pr_body,
-                )
-                print(f"  ✅ Branch: {branch}")
-                print(f"  ✅ Commit: {commit_hash}")
-                if conflict_result == "auto_resolved":
-                    print(f"  🔧 Conflicts auto-resolved during rebase")
-                elif conflict_result == "manual_required":
-                    print(f"  ⚠️  Conflicts require manual resolution")
-                print(f"  🔗 {pr_url}")
-            except Exception as e:
-                print(f"  ❌ Failed: {e}")
+            _approve_high_risk(p, repo_obj, issue_linker, iteration_id)
             approved_count += 1
             repos_affected.add(p["repo_path"])
         else:
@@ -2832,36 +3055,55 @@ def cmd_approve(args) -> int:
                     repo=repo_obj.path,
                     approved_by="user",
                 )
-
-                # v3.1: Auto-close related issues for low/medium risk approved changes
                 repo_changed = [p.get("file_path", "")]
-                close_result = issue_linker.close_related_issues(repo_obj.resolve_path(), repo_changed, iteration_id)
+                close_result = issue_linker.close_related_issues(
+                    repo_obj.resolve_path(), repo_changed, iteration_id,
+                )
                 if close_result["found"] > 0:
                     print(f"  🔗 IssueLinker: closed {close_result['closed']} of {close_result['found']} related issue(s)")
             except Exception as e:
                 print(f"  ❌ [{p['id']}] {p['description'][:60]}: {e}")
 
-    if approved_count > 0:
-        for rp in repos_affected:
-            repo_obj = Repository(path=rp, type="skill")
-            try:
-                git_push(repo_obj)
-            except Exception as e:
-                print(f"  ⚠️  Push failed for {rp}: {e}")
+    return approved_count, repos_affected
 
-    manifest_data["items_approved"] = approved_count
-    manifest_data["status"] = "completed"
-    (ITERATIONS_DIR / iteration_id / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
 
-    for i, cat_iter in enumerate(catalog["iterations"]):
-        if cat_iter["version"] == iteration_id:
-            catalog["iterations"][i]["status"] = "completed"
-            catalog["iterations"][i]["items_approved"] = approved_count
-
-    (ITERATIONS_DIR / "catalog.json").write_text(json.dumps(catalog, indent=2))
-
-    print(f"\n✅ Approved and executed {approved_count} items")
-    return 0
+def _approve_high_risk(
+    p: dict,
+    repo_obj: Repository,
+    issue_linker: IssueLinker,
+    iteration_id: str,
+) -> None:
+    """Handle approval of a high-risk item (branch + PR)."""
+    print(f"\n🔴 High-risk: {p['description'][:60]}")
+    print(f"  Creating branch and PR...")
+    branch = create_branch_for_change(repo_obj, p["description"][:50])
+    conflict_result = handle_pr_conflict(repo_obj, branch)
+    try:
+        commit_hash = git_commit(repo_obj, f"auto-evolve: {p['description']}")
+        pr_body = f"## auto-evolve: {p['description']}\n\n### Changes\n\n- {p['description']}"
+        pr_url = create_pr(
+            repo_obj, branch,
+            p["description"],
+            [ChangeItem(
+                id=p["id"],
+                description=p["description"],
+                file_path=p["file_path"],
+                change_type="approved",
+                risk=RiskLevel.HIGH,
+                category=ChangeCategory.PENDING_APPROVAL,
+                repo_path=repo_obj.path,
+            )],
+            extra_body=pr_body,
+        )
+        print(f"  ✅ Branch: {branch}")
+        print(f"  ✅ Commit: {commit_hash}")
+        if conflict_result == "auto_resolved":
+            print(f"  🔧 Conflicts auto-resolved during rebase")
+        elif conflict_result == "manual_required":
+            print(f"  ⚠️  Conflicts require manual resolution")
+        print(f"  🔗 {pr_url}")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
 
 
 def create_branch_for_change(repo: Repository, change_desc: str) -> str:
@@ -3121,51 +3363,10 @@ def cmd_schedule(args) -> int:
         return 0
 
     if args.suggest:
-        # v3.1: Smart scheduling suggestions
-        scheduler = SmartScheduler(config)
-        suggestions = scheduler.suggest_schedule()
-        if not suggestions:
-            print("No repositories configured.")
-            return 0
-        print("📊 Smart Schedule Suggestions")
-        print("=" * 60)
-        activity_icons = {
-            "very_active": "🔥",
-            "active": "⚡",
-            "normal": "📅",
-            "idle": "💤",
-        }
-        for path, sug in suggestions.items():
-            icon = activity_icons.get(sug["activity"], "📦")
-            action_icon = {"increase": "⬆️", "decrease": "⬇️", "maintain": "➡️"}.get(sug["action"], "➡️")
-            print(f"\n{icon} {sug['name']} ({path})")
-            print(f"   Activity: {sug['activity']} ({sug['commits_last_7_days']} commits/7d)")
-            print(f"   Current interval:  {sug['current_interval_hours']}h")
-            print(f"   Recommended:       {sug['recommended_interval_hours']}h {action_icon}")
-            if sug["change_hours"] != 0:
-                print(f"   → Change by {abs(sug['change_hours'])}h ({sug['action']})")
-        print("\n💡 Apply with: auto-evolve.py schedule --auto")
-        return 0
+        return _schedule_suggest(config)
 
     if args.auto:
-        # v3.1: Auto-apply scheduling recommendations
-        scheduler = SmartScheduler(config)
-        suggestions = scheduler.suggest_schedule()
-        if not suggestions:
-            print("No repositories configured.")
-            return 0
-        updates: dict[str, int] = {}
-        for path, sug in suggestions.items():
-            if sug["action"] != "maintain":
-                updates[path] = sug["recommended_interval_hours"]
-        if not updates:
-            print("✅ All repositories already at recommended intervals.")
-            return 0
-        result = scheduler.apply_schedule(updates)
-        print("✅ Applied schedule changes:")
-        for a in result["applied"]:
-            print(f"   {a['path']}: {a['old_interval']}h → {a['new_interval']}h")
-        return 0
+        return _schedule_auto(config)
 
     if args.every:
         interval = args.every
@@ -3192,6 +3393,50 @@ def cmd_schedule(args) -> int:
     print("auto-evolve.py schedule --auto           Apply recommended intervals (v3.1)")
     print("auto-evolve.py schedule --show            Show current schedule")
     print("auto-evolve.py schedule --remove          Remove cron job")
+    return 0
+
+
+def _schedule_suggest(config: dict) -> int:
+    """Show smart scheduling recommendations."""
+    scheduler = SmartScheduler(config)
+    suggestions = scheduler.suggest_schedule()
+    if not suggestions:
+        print("No repositories configured.")
+        return 0
+    print("📊 Smart Schedule Suggestions")
+    print("=" * 60)
+    activity_icons = {"very_active": "🔥", "active": "⚡", "normal": "📅", "idle": "💤"}
+    for path, sug in suggestions.items():
+        icon = activity_icons.get(sug["activity"], "📦")
+        action_icon = {"increase": "⬆️", "decrease": "⬇️", "maintain": "➡️"}.get(sug["action"], "➡️")
+        print(f"\n{icon} {sug['name']} ({path})")
+        print(f"   Activity: {sug['activity']} ({sug['commits_last_7_days']} commits/7d)")
+        print(f"   Current interval:  {sug['current_interval_hours']}h")
+        print(f"   Recommended:       {sug['recommended_interval_hours']}h {action_icon}")
+        if sug["change_hours"] != 0:
+            print(f"   → Change by {abs(sug['change_hours'])}h ({sug['action']})")
+    print("\n💡 Apply with: auto-evolve.py schedule --auto")
+    return 0
+
+
+def _schedule_auto(config: dict) -> int:
+    """Auto-apply scheduling recommendations."""
+    scheduler = SmartScheduler(config)
+    suggestions = scheduler.suggest_schedule()
+    if not suggestions:
+        print("No repositories configured.")
+        return 0
+    updates: dict[str, int] = {}
+    for path, sug in suggestions.items():
+        if sug["action"] != "maintain":
+            updates[path] = sug["recommended_interval_hours"]
+    if not updates:
+        print("✅ All repositories already at recommended intervals.")
+        return 0
+    result = scheduler.apply_schedule(updates)
+    print("✅ Applied schedule changes:")
+    for a in result["applied"]:
+        print(f"   {a['path']}: {a['old_interval']}h → {a['new_interval']}h")
     return 0
 
 
@@ -3417,7 +3662,8 @@ def cmd_costs(args) -> int:
 # CLI Entry Point
 # ===========================================================
 
-def main() -> int:
+def _build_argument_parser() -> argparse.ArgumentParser:
+    """Build and return the root argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
         description="Auto-Evolve v3.1 — LLM-driven automated skill iteration manager",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3466,7 +3712,7 @@ def main() -> int:
     release_p.add_argument("--version", required=True, dest="version", type=str, help="Version tag (e.g. 2.3.0)")
     release_p.add_argument("--changelog", type=str, default="", help="Changelog / release notes")
 
-    # schedule (v3.1: added --suggest and --auto)
+    # schedule (v3.1)
     schedule_p = subparsers.add_parser("schedule", help="Schedule management (cron setup)")
     schedule_p.add_argument("--every", type=int, help="Set scan interval in hours")
     schedule_p.add_argument("--suggest", action="store_true", help="Smart scheduling recommendations (v3.1)")
@@ -3503,6 +3749,11 @@ def main() -> int:
     costs_p.add_argument("--iteration", dest="iteration_id", type=str, help="Specific iteration ID")
     costs_p.add_argument("--limit", type=int, default=5, help="Limit iterations shown")
 
+    return parser
+
+
+def main() -> int:
+    parser = _build_argument_parser()
     args = parser.parse_args()
 
     commands: dict[str, callable] = {
