@@ -3673,18 +3673,25 @@ class FourPerspectiveScanner:
             return {}
         try:
             data = json.loads(history_file.read_text(encoding="utf-8"))
-            # data is { repo_path: { perspective: [findings] } }
+            # data is { repo_path: [scan_round1, scan_round2, ...] }
+            # Each scan_round is {perspective: [findings]}
             if isinstance(data, dict):
-                # Return the first (and usually only) repo entry
                 for v in data.values():
-                    if isinstance(v, dict):
+                    if isinstance(v, list) and len(v) > 0:
+                        # Return the most recent scan round
+                        return v[0] if isinstance(v[0], dict) else {}
+                    elif isinstance(v, dict):
                         return v
             return {}
         except Exception:
             return {}
 
     def _save_scan_history(self, repo_path: Path, findings: list["PerspectiveFinding"]) -> None:
-        """Save current scan findings to history for future comparison."""
+        """Save current scan findings to history for trend analysis.
+
+        v4.3: Stores multiple scan rounds (last 10) for trend tracking.
+        Structure: { repo_path: [latest_round, prev_round, ...] }
+        """
         history_file = self._scan_history_file(repo_path)
         try:
             # Group findings by perspective
@@ -3694,22 +3701,31 @@ class FourPerspectiveScanner:
                 if persp not in by_perspective:
                     by_perspective[persp] = []
                 by_perspective[persp].append({
-                    "description": f.description,
+                    "description": f.description.replace("[NEW] ", ""),
                     "category": f.category,
                     "impact_score": f.impact_score,
                     "file_path": f.file_path,
                     "timestamp": __import__("datetime").datetime.now().isoformat(),
                 })
-            # Merge with existing history, keeping only recent entries
-            existing = {}
+
+            new_round = by_perspective
+            key = str(repo_path.resolve())
+
+            # Load existing history
+            existing: dict[str, list] = {}
             if history_file.exists():
                 try:
                     existing = json.loads(history_file.read_text(encoding="utf-8"))
                 except Exception:
                     existing = {}
-            # Structure: { repo_path: by_perspective }
-            key = str(repo_path.resolve())
-            existing = {key: by_perspective}
+
+            # Prepend new round, keep last 10
+            if key in existing and isinstance(existing[key], list):
+                existing[key] = [new_round] + existing[key]
+                existing[key] = existing[key][:10]
+            else:
+                existing[key] = [new_round]
+
             history_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             print(f"  [WARN] Could not save scan history: {e}")
@@ -3749,20 +3765,23 @@ class FourPerspectiveScanner:
 
         owner, repo = remote_url
 
-        # Format findings as GitHub markdown
-        body = self._format_github_comment(findings, github_event)
+        # Format findings as GitHub markdown (with trend if repo_path available)
+        body = self._format_github_comment(findings, github_event, repo_path=repo_path)
 
         # Determine if this is a PR comment or issue
         pr_number = os.environ.get("PR_NUMBER", "")
         issue_number = os.environ.get("ISSUE_NUMBER", "")
 
+        # v4.3: Always create an issue, post comment on PR if applicable
+        # Close old auto-evolve issues if findings are resolved
+        self._check_and_close_old_issues(token, owner, repo, findings)
+
+        # Always create new issue with scan results
+        ok = self._create_issue(token, owner, repo, body)
+        # Also post PR comment if this is from a PR
         if pr_number:
-            return self._post_pr_comment(token, owner, repo, pr_number, body)
-        elif issue_number:
-            return self._create_issue_comment(token, owner, repo, issue_number, body)
-        else:
-            # Default: create an issue
-            return self._create_issue(token, owner, repo, body)
+            self._post_pr_comment(token, owner, repo, pr_number, body)
+        return ok
 
     def _get_github_remote(self, repo_path: Path) -> tuple[str, str] | None:
         """Get (owner, repo) from git remote URL."""
@@ -3785,14 +3804,26 @@ class FourPerspectiveScanner:
         return None
 
     def _format_github_comment(self, findings: list["PerspectiveFinding"],
-                                event: str) -> str:
-        """Format findings as GitHub-flavored markdown."""
+                                event: str,
+                                repo_path: Path = None) -> str:
+        """Format findings as GitHub-flavored markdown with trend summary.
+
+        v4.3: Includes trend comparison vs previous scan.
+        """
         lines = [
             f"## 🔍 Auto-Evolve Scan Results (`{event}`)",
             "",
-            f"Found **{len(findings)}** finding(s):",
-            "",
         ]
+
+        # Trend summary (P2: scan report aggregation)
+        if repo_path:
+            trend = self._get_scan_trend(repo_path)
+            if trend:
+                lines.append(trend)
+                lines.append("")
+
+        lines.append(f"Found **{len(findings)}** finding(s):")
+        lines.append("")
 
         by_perspective: dict[str, list["PerspectiveFinding"]] = {}
         for f in findings:
@@ -3821,6 +3852,46 @@ class FourPerspectiveScanner:
         lines.append("---")
         lines.append("_Auto-evolved by [auto-evolve](https://github.com/relunctance/auto-evolve)_")
         return "\n".join(lines)
+
+    def _get_scan_trend(self, repo_path: Path) -> str:
+        """Build trend summary from scan history. v4.3."""
+        history_file = self._scan_history_file(repo_path)
+        if not history_file.exists():
+            return ""
+
+        try:
+            data = json.loads(history_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, dict) and len(v) >= 2:
+                        # We have at least 2 scans — build trend
+                        all_scans = []
+                        for persp, findings in v.items():
+                            if isinstance(findings, list) and len(findings) > 0:
+                                all_scans.append({
+                                    "perspective": persp,
+                                    "count": len(findings),
+                                    "findings": findings,
+                                })
+
+                        if len(all_scans) < 2:
+                            return ""
+
+                        latest = all_scans[0]
+                        prev = all_scans[1] if len(all_scans) > 1 else None
+
+                        if prev:
+                            delta = latest["count"] - prev["count"]
+                            delta_str = f"{delta:+d}" if delta != 0 else "0"
+                            emoji = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
+                            trend_line = (
+                                f"{emoji} **Trend**: {prev['count']} → **{latest['count']}** findings "
+                                f"({delta_str}) since last scan"
+                            )
+                            return trend_line
+        except Exception:
+            pass
+        return ""
 
     def _post_pr_comment(self, token: str, owner: str, repo: str,
                          pr_number: str, body: str) -> bool:
@@ -3885,6 +3956,71 @@ class FourPerspectiveScanner:
         except Exception as e:
             print(f"[GitHub] Failed to post issue comment: {e}")
         return False
+
+    def _check_and_close_old_issues(self, token: str, owner: str, repo: str,
+                                    current_findings: list["PerspectiveFinding"]) -> None:
+        """Close auto-evolve issues that are no longer appearing in scans (resolved)."""
+        import urllib.request, json
+
+        # Get all open auto-evolve issues
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues"
+        url += "?state=open&labels=auto-evolve&per_page=50"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                issues = json.loads(resp.read())
+        except Exception:
+            return
+
+        # Build set of current finding descriptions (strip [NEW] prefix)
+        current_descs = {f.description.replace("[NEW] ", "").strip() for f in current_findings}
+
+        for issue in issues:
+            issue_title = issue.get("title", "")
+            # Only close auto-evolve scan issues (titled like "🔍 Auto-Evolve Scan")
+            if "Auto-Evolve Scan" not in issue_title:
+                continue
+            issue_number = issue.get("number")
+            body = issue.get("body", "")
+
+            # Extract finding descriptions from previous issue body
+            prev_descs = set()
+            for line in body.split("\n"):
+                if line.strip().startswith(("🆕", "  ", "- **")):
+                    # Extract description text
+                    for part in line.split("\n"):
+                        part = part.strip()
+                        if part.startswith(("🆕", "  ")):
+                            # Remove emoji and parse
+                            part = part.lstrip("🆕 ").strip()
+                            if part.startswith("**"):
+                                parts = part.split("**")
+                                if len(parts) >= 2:
+                                    prev_descs.add(parts[1].strip())
+
+            # Close issue if all findings resolved (no longer in current scan)
+            # Only close if issue body has findings that are ALL resolved now
+            if prev_descs and prev_descs <= current_descs:
+                # Some old findings still present - don't close
+                pass
+            elif prev_descs and not (prev_descs & current_descs):
+                # ALL old findings resolved - close the issue
+                close_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
+                close_req = urllib.request.Request(
+                    close_url, data=json.dumps({"state": "closed"}).encode(), method="PATCH"
+                )
+                close_req.add_header("Authorization", f"Bearer {token}")
+                close_req.add_header("Accept", "application/vnd.github+json")
+                close_req.add_header("X-GitHub-Api-Version", "2022-11-28")
+                try:
+                    with urllib.request.urlopen(close_req, timeout=15) as r:
+                        if r.status in (200, 201):
+                            print(f"[GitHub] Closed resolved issue #{issue_number}")
+                except Exception as e:
+                    print(f"[GitHub] Failed to close issue #{issue_number}: {e}")
 
     def scan(self) -> list[PerspectiveFinding]:
         """

@@ -6,6 +6,11 @@ on:
   push:
     branches: [master, main]
   workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Repository path to scan (default: current repo)'
+        required: false
+        default: ''
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -31,12 +36,11 @@ jobs:
           PR_NUMBER: ${{ github.event.number }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python3 scripts/auto-evolve.py scan --repo . --dry-run
+          TARGET=${{ github.event.inputs.target_repo || '.' }}
+          python3 scripts/auto-evolve.py scan --repo "$TARGET" --github-event ${{ github.event_name }}
 
-      - name: Post results as PR comment
-        if: github.event_name == 'pull_request'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.number }}
+      - name: Scan summary
+        if: always()
         run: |
-          python3 scripts/auto-evolve.py scan --repo . --github-event pr_review
+          echo "Scan completed at ${{ github.event_name }}"
+          echo "Results posted as GitHub issue"
