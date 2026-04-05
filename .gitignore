@@ -27,3 +27,15 @@ npm-debug.log*
 .vscode/
 *.swp
 *.swo
+
+# Private workspace files (never commit these)
+MEMORY.md
+USER.md
+SOUL.md
+IDENTITY.md
+AGENTS.md
+SOUL.md
+BOOTSTRAP.md
+HEARTBEAT.md
+TOOLS.md
+memory/
