@@ -1,6 +1,6 @@
 # Auto-Evolve v4.0
 
-**让项目自己学会进化——装一次，项目越用越好。**
+**Make your projects self-evolve — install once, they keep getting better.**
 
 > You install it once. It runs in the background. Your projects get smarter — automatically.
 
@@ -11,213 +11,214 @@
 
 ---
 
-## ✨ 为什么需要 Auto-Evolve？
+## ✨ Why Auto-Evolve?
 
-没有它的时候，代码库会慢慢腐化：
+Without it, codebases slowly rot:
 
 ```
-TODO 堆积     →  重复代码扩散     →  技术债务积累
-手动审查      →  好实践无法传承     →  团队各自为政
+TODO pile-up     →  Duplicate code spreads     →  Technical debt accumulates
+Manual review    →  Good practices don't stick  →  Teams work in silos
 ```
 
-Auto-Evolve 解决了这一切——**项目会自己变好，不需要你反复介入。**
+Auto-Evolve fixes all of this — **projects get better on their own, without constant manual intervention.**
 
 ---
 
-## 🎯 核心能力
+## 🎯 Core Capabilities
 
-### 四视角智能巡检
+### Four-Perspective Smart Inspection
 
-不像其他扫描工具只会报「代码问题」，Auto-Evolve 从四个维度审视项目：
-
-```
-👤 用户      📦 产品      🏗 项目      ⚙️ 技术
-"好用吗？"  "做到了吗？"  "运作健康吗？" "代码健康吗？"
-```
-
-每个维度有不同的权重，根据项目类型动态调整。
-
-### 支持 12+ 种项目类型
+Unlike other scanners that only report "code problems," Auto-Evolve examines projects from four dimensions:
 
 ```
-前端应用  →  Web / 移动 App / 桌面 App / 小程序 / VSCode 插件
-后端服务  →  REST API / 微服务 / CLI 工具 / DevOps / 中间件
-智能体    →  Skill / Agent / ML Pipeline / AI 服务
-基础设施  →  IoT 固件 / 区块链合约 / 数据管道
-内容与文档 →  SSG 文档站 / API 文档 / 静态博客
+👤 User      📦 Product      🏗 Project      ⚙️ Tech
+"Usable?"  "Delivered?"   "Healthy?"    "Clean code?"
 ```
 
-自动检测项目类型，匹配对应巡检标准。
+Each dimension has different weights, dynamically adjusted based on project type.
 
-### 与 project-standard 无缝集成
-
-Auto-Evolve 内置了 **project-standard** 作为评判标准库：
+### Supports 12+ Project Types
 
 ```
-扫描项目 → 检测类型 → 加载对应标准 → 四视角巡检 → 输出报告
-                                    ↓
-                     product-requirements.md（产品视角）
-                     user-perspective.md  （用户视角）
-                     project-inspection.md（项目视角）
-                     code-standards.md    （技术视角）
+Frontend     →  Web / Mobile App / Desktop / Mini-app / VSCode Plugin
+Backend      →  REST API / Microservice / CLI / DevOps / Middleware
+AI/Agent    →  Skill / Agent / ML Pipeline / AI Service
+Infrastructure →  IoT Firmware / Blockchain / Data Pipeline
+Content     →  SSG Docs / API Docs / Static Blog
 ```
 
-不是拍脑袋评判，是**有标准的系统性巡检**。
+Auto-detects project type, matches corresponding inspection standards.
 
-### learnings——项目的记忆
+### Seamless project-standard Integration
+
+Auto-Evolve has **project-standard** built in as its evaluation engine:
+
+```
+Scan project → Detect type → Load standards → Four-perspective scan → Report
+                                       ↓
+                     product-requirements.md (Product)
+                     user-perspective.md   (User)
+                     project-inspection.md (Project)
+                     code-standards.md   (Tech)
+```
+
+Not arbitrary judgment — **systematic inspection with standards.**
+
+### learnings — Project Memory
 
 ```
 .learnings/
-├── approvals.json    ← 成功过的改动
-├── rejections.json  ← 被拒绝的改动 + 原因
-└── metrics/        ← 每次迭代的指标趋势
+├── approvals.json    ← Approved changes
+├── rejections.json  ← Rejected changes + reasons
+└── metrics/        ← Iteration metrics
 ```
 
-同一个错误不会犯两次。Auto-Evolve 越用越懂这个项目。
+The same mistake won't be made twice. Auto-Evolve gets smarter about each project.
 
 ---
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
 ```bash
-# 一键安装（推荐）
+# One-line install (recommended)
 clawhub install auto-evolve
 clawhub install project-standard
 clawhub install soul-force
 
-# 配置要巡检的项目
+# Configure project to inspect
 python3 scripts/auto-evolve.py repo-add ~/.openclaw/workspace/skills/soul-force --type skill --monitor
 
-# 启动全自动巡检
+# Start fully automated inspection
 python3 scripts/auto-evolve.py set-mode full-auto
 python3 scripts/auto-evolve.py schedule --every 10
 ```
 
 ---
 
-## 🔍 巡检输出示例
+## 🔍 Inspection Output Example
 
 ```
 🔍 Auto-Evolve Scanner v4.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📋 Project: soul-force (智能体)
-   类型: 智能体/AI  |  权重: 产品30% / 用户25% / 技术25% / 项目20%
+📋 Project: soul-force (AI/Agent)
+   Type: AI/Agent  |  Weights: Product30% / User25% / Tech25% / Project20%
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-👤 用户视角 ★★★★★
+👤 User Perspective ★★★★★
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1. 🚨 Impact 0.8
-     SOUL.md 缺少 README 入口说明，新人找不到怎么开始
-     → 建议：在 SOUL.md 头部添加 3 步快速开始
+     SOUL.md lacks README entry — newcomers can't find where to start
+     → Suggestion: Add 3-step quickstart at top of SOUL.md
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📦 产品视角 ★★★★
+📦 Product Perspective ★★★★
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1. 🚨 Impact 0.7
-     README 承诺"自动进化"，但实际没有定时巡检机制
-     → 建议：添加 auto-evolve schedule 配置说明
+     README promises "auto-evolution" but no scheduled inspection mechanism exists
+     → Suggestion: Add auto-evolve schedule config docs
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚙️ 技术视角 ★★
+⚙️ Tech Perspective ★★
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  [opt] 🟡 duplicate_code: memory.py 重复逻辑出现 3 次
+  [opt] 🟡 duplicate_code: memory.py has 3 repeated logic blocks
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💾 Learnings: 3 approvals, 1 rejection
-   🚫 主人拒绝过：生成 test 文件（2次）→ 已停止尝试
+   🚫 Owner rejected: generating test files (2x) → Stopped trying
 ```
 
 ---
 
-## 🔧 命令一览
+## 🔧 Commands
 
-| 命令 | 说明 |
-|------|------|
-| `scan` | 巡检所有项目 |
-| `scan --dry-run` | 预览模式（不执行） |
-| `scan --recall-persona master` | 召回主人记忆巡检 |
-| `confirm` | 确认并执行待处理改动 |
-| `approve / reject` | 批准/拒绝，记录到 learnings |
-| `set-mode full-auto` | 全自动化模式 |
-| `learnings` | 查看项目记忆 |
-| `rollback` | 回滚上一版本 |
-| `schedule --every 10` | 每 10 分钟自动巡检 |
-
----
-
-## 🧠 三层记忆架构
-
-```
-第1层: OpenClaw SQLite   ← 完整对话历史，跨 persona 召回
-第2层: hawk-bridge       ← 向量语义记忆，按 persona 隔离
-第3层: learnings/        ← 项目级记忆，记录批准/拒绝
-```
-
-三层记忆叠加，Auto-Evolve 越来越懂主人偏好。
+| Command | Description |
+|---------|-------------|
+| `scan` | Inspect all projects |
+| `scan --dry-run` | Preview mode (no execution) |
+| `scan --recall-persona master` | Recall owner memory for inspection |
+| `confirm` | Confirm and execute pending changes |
+| `approve / reject` | Approve/reject, record to learnings |
+| `set-mode full-auto` | Full automation mode |
+| `learnings` | View project memory |
+| `rollback` | Rollback to previous version |
+| `schedule --every 10` | Auto-inspect every 10 minutes |
 
 ---
 
-## 🛡️ 安全机制
+## 🧠 Three-Layer Memory Architecture
 
 ```
-✓ 版本控制       所有改动有 git 历史，可回滚
-✓ 质量门槛       pytest / jest 测试通过才算成功
-✓ learnings 过滤  被拒绝的改动永不重复尝试
-✓ 隐私保护       不外泄 closed 仓库代码
-✓ 权限分离       高风险改动必须主人确认
+Layer 1: OpenClaw SQLite  ← Full conversation history, cross-persona recall
+Layer 2: hawk-bridge     ← Vector semantic memory, persona-isolated
+Layer 3: learnings/      ← Project-level memory, approvals/rejections
+```
+
+Three layers stacked, Auto-Evolve gets better with every use.
+
+---
+
+## 🛡️ Safety Mechanisms
+
+```
+✓ Version control        All changes have git history, rollbackable
+✓ Quality gates         pytest / jest tests must pass
+✓ learnings filter     Rejected changes never repeat
+✓ Privacy protection   Closed repo code never leaks
+✓ Permission split    High-risk changes require owner confirmation
 ```
 
 ---
 
-## 📦 依赖 Skills
+## 📦 Dependency Skills
 
-| Skill | 作用 | 必需 |
-|-------|------|------|
-| **project-standard** | 项目分类 + 四视角标准库 | ✅ |
-| **auto-evolve** | 巡检引擎 + 执行器 | ✅ |
-| **soul-force** | learnings 分析 + 每日记忆总结 | 推荐 |
-| **hawk-bridge** | 向量语义记忆，按 persona 隔离 | 可选 |
+| Skill | Role | Required |
+|-------|------|---------|
+| **project-standard** | Project taxonomy + four-perspective standards | ✅ |
+| **auto-evolve** | Inspection engine + executor | ✅ |
+| **soul-force** | learnings analysis + daily memory summary | Recommended |
+| **hawk-bridge** | Vector semantic memory, persona-isolated | Optional |
 
 ---
 
-## 工作原理（v4.0）
+## How It Works (v4.0)
 
 ```
 auto-evolve scan
     │
     ▼
 ┌──────────────────────────────────────────────────────┐
-│  Step 1: project-standard 项目类型检测               │
-│  自动识别：前端应用 / 后端服务 / 智能体 / 基础设施     │
-│  确定该类型的视角权重                                 │
+│  Step 1: project-standard Project Type Detection      │
+│  Auto-detects: Frontend / Backend / AI/Agent / Infrastructure │
+│  Determines perspective weights for this type        │
 └──────────────────────┬───────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  Step 2: 四视角巡检 × 标准参照                        │
+│  Step 2: Four-Perspective × Standards               │
 │                                                      │
-│  👤 USER    → user/user-perspective.md             │
+│  👤 USER    → user/user-perspective.md            │
 │  📦 PRODUCT → product-requirements.md               │
-│  🏗 PROJECT → project-inspection.md               │
-│  ⚙️ TECH   → code-standards.md                     │
+│  🏗 PROJECT → project-inspection.md                │
+│  ⚙️ TECH   → code-standards.md                   │
 └──────────────────────┬───────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  Step 3: 与标准对比，输出差距分析报告                 │
+│  Step 3: Compare findings against reference docs    │
+│  Gap analysis → Prioritized report by perspective   │
 └──────────────────────────────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  Step 4: 读取 learnings，执行/通知/记录               │
+│  Step 4: Read learnings, execute/notify/record      │
 └──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 相关项目
+## Related Projects
 
-- [project-standard](https://github.com/relunctance/gql-openclaw) — 四视角巡检标准库
-- [SoulForce](https://github.com/relunctance/soul-force) — AI Agent 记忆进化系统
-- [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw 上下文记忆集成
+- [project-standard](https://github.com/relunctance/gql-openclaw) — Four-perspective inspection standard library
+- [SoulForce](https://github.com/relunctance/soul-force) — AI Agent memory evolution system
+- [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw context memory integration
 
 ---
 
