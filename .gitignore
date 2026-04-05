@@ -1,3 +1,8 @@
+# ===========================================================
+# Auto-Evolve
+# Automated skill iteration manager
+# ===========================================================
+
 # Dependencies
 node_modules/
 
@@ -13,10 +18,9 @@ hawk-bridge/
 .DS_Store
 Thumbs.db
 
-# OpenClaw workspace state (don't commit these)
+# OpenClaw workspace state (never commit)
 .openclaw/
 .clawhub/
-.workspace/
 
 # Logs
 *.log
@@ -28,14 +32,20 @@ npm-debug.log*
 *.swp
 *.swo
 
+# Python cache
+__pycache__/
+*.pyc
+
 # Private workspace files (never commit these)
 MEMORY.md
 USER.md
 SOUL.md
 IDENTITY.md
 AGENTS.md
-SOUL.md
 BOOTSTRAP.md
 HEARTBEAT.md
 TOOLS.md
 memory/
+
+# Nested skills (this repo IS the skill, not a container)
+skills/
