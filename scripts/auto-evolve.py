@@ -3330,10 +3330,11 @@ class ProductThinkingScanner:
 
     def scan(self) -> list[ProductThinkingFinding]:
         """
-        Two-phase scan:
-        1. Product docs (README/SKILL.md) — extract documented pain points, ask what's still broken
-        2. Code files — implementation quality (secondary)
-        3. Learnings patterns — corrections that keep being rejected
+        One-shot holistic scan: like receiving a Feishu message asking
+        "这个项目还有什么可以优化的地方？"
+        
+        Gives LLM full context (README + code + learnings + hawk prefs) and
+        asks it to form a human-like opinion, not run a checklist.
         """
         all_findings: list[ProductThinkingFinding] = []
         print(f"[ProductThinkingScanner] Starting scan of {len(self.repos)} repos...")
@@ -3344,22 +3345,170 @@ class ProductThinkingScanner:
             if not repo_path.exists():
                 continue
 
-            # Phase 1: Product docs (high priority — these define WHAT should be solved)
-            print(f"\n  [Phase 1] Product docs — pain points from README/SKILL.md...")
-            doc_findings = self._scan_product_docs(repo)
-            all_findings.extend(doc_findings)
-
-            # Phase 2: Code files (secondary — HOW well it's implemented)
-            print(f"\n  [Phase 2] Code files — implementation quality...")
-            code_findings = self._scan_code_files(repo)
-            all_findings.extend(code_findings)
-
-            # Phase 3: Learnings patterns
-            learnings_findings = self._analyze_learnings_patterns(repo)
-            all_findings.extend(learnings_findings)
+            print(f"\n  [Holistic] Thinking about {repo_path.name} like a human who received a Feishu message...")
+            findings = self._holistic_review(repo)
+            all_findings.extend(findings)
 
         all_findings.sort(key=lambda f: f.impact_score, reverse=True)
         return all_findings
+
+    def _gather_context(self, repo: Repository) -> str:
+        """Gather all available context for holistic analysis."""
+        repo_path = repo.resolve_path()
+        parts = []
+
+        # README content (first 4000 chars)
+        for fname in ["README.md", "README.zh-CN.md"]:
+            fp = repo_path / fname
+            if fp.exists():
+                try:
+                    content = fp.read_text(encoding="utf-8")[:4000]
+                    parts.append(f"\n\n=== {fname} (excerpt) ===\n{content}")
+                    break
+                except Exception:
+                    pass
+
+        # SKILL.md (first 2000 chars)
+        sk = repo_path / "SKILL.md"
+        if sk.exists():
+            try:
+                parts.append(f"\n\n=== SKILL.md (excerpt) ===\n{sk.read_text(encoding='utf-8')[:2000]}")
+            except Exception:
+                pass
+
+        # Main script (first 200 lines)
+        main_scripts = list(repo_path.glob("scripts/*.py"))
+        if main_scripts:
+            main_script = sorted(main_scripts, key=lambda p: p.stat().st_size, reverse=True)[0]
+            try:
+                lines = main_script.read_text(encoding="utf-8").splitlines()[:200]
+                parts.append(f"\n\n=== Main script: {main_script.name} (first 200 lines) ===\n" + "\n".join(lines))
+            except Exception:
+                pass
+
+        # Learnings (last 5 approvals + rejections)
+        learnings = self.learnings
+        if learnings and learnings != f"No learnings history yet for {self.effective_persona}.":
+            parts.append(f"\n\n=== Learnings history ===\n{learnings[:1000]}")
+
+        # Hawk-bridge preferences
+        if self.hawk_prefs.get("disliked") or self.hawk_prefs.get("liked"):
+            liked = ", ".join(self.hawk_prefs.get("liked", [])[:3])
+            disliked = ", ".join(self.hawk_prefs.get("disliked", [])[:3])
+            parts.append(f"\n\n=== Owner preferences (hawk-bridge) ===\nLiked: {liked or '(none)'}\nDisliked: {disliked or '(none)'}")
+
+        return "\n".join(parts)
+
+    def _holistic_review(self, repo: Repository) -> list[ProductThinkingFinding]:
+        """
+        Single LLM call that mirrors how a human would think when asked:
+        'What can be improved in this project?'
+        
+        Asks the LLM to think from the owner's perspective, forming real opinions
+        rather than running a checklist. Output is human-readable, not a code report.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+
+        repo_path = repo.resolve_path()
+        context = self._gather_context(repo)
+
+        system = (
+            f"You are a sharp, experienced developer who just received a Feishu message "
+            f"from the owner of this project. The message says:\n\n"
+            f"\"你觉得 {repo_path.name} 还有什么可以优化的地方？有什么不足？\"\n\n"
+            f"You are {self.effective_persona}. You use this project. "
+            f"You have opinions. You are NOT a static analyzer.\n\n"
+            f"【Context about you】\n{self.master_summary[:800]}\n\n"
+            f"【What you like/dislike】\n"
+            f"  Liked: {', '.join(self.hawk_prefs.get('liked', [])[:3]) or '(none)'}\n"
+            f"  Disliked: {', '.join(self.hawk_prefs.get('disliked', [])[:3]) or '(none)'}\n\n"
+            f"【Your learnings from past reviews】\n{self.learnings[:600]}\n\n"
+            "Answer the owner's Feishu message directly. Form a real opinion.\n"
+            "Think about:\n"
+            "  - What does this project CLAIM to do? Is it actually doing it well?\n"
+            "  - What would frustrate you as a user of this project?\n"
+            "  - What's awkward, counterintuitive, or missing?\n"
+            "  - What have you seen in similar projects that is better?\n"
+            "  - What looks like it was half-implemented or copy-pasted?\n\n"
+            "IMPORTANT: Your response must be a JSON array. Each item is ONE finding.\n"
+            "Be specific. 'The code could be cleaner' is NOT a finding. "
+            "'The repeated SoulForgeConfig initialization (15x) suggests no shared setup function' IS.\n\n"
+            "Return a JSON array with one object per finding:\n"
+            "  finding_id: short unique string\n"
+            "  insight: (Chinese, 50-200 chars) what you genuinely think is wrong or missing\n"
+            "  category: one of: product_gap | structural_code | user_friction | missing_feature | partial_implementation\n"
+            "  impact: (0.0-1.0) how much this hurts the project or its users\n"
+            "  evidence: (array of 1-3 short text snippets from the code/docs that support this)\n"
+            "  suggested_fix: (Chinese, 50-150 chars) what you would do to fix it\n"
+            "  why_now: (Chinese, 50 chars) why this matters right now\n"
+            "  repo_path: (string) relative path to the relevant file, or '' if project-wide\n\n"
+            "If you genuinely have nothing meaningful to say, return [] (empty array).\n"
+            "Do NOT list duplicate_code or long_function findings — those are handled separately.\n"
+            "Do NOT repeat pain points already documented in the files.\n"
+            "Think like a user, not a linter."
+        )
+
+        prompt = (
+            f"You received this Feishu message:\n"
+            f"\"你觉得 {repo_path.name} 还有什么可以优化的地方？有什么不足？\"\n\n"
+            f"Here is the project context:\n{context}\n\n"
+            "Reply as if you are a developer who uses this project daily. "
+            "Be honest, specific, and helpful. Return ONLY a JSON array."
+        )
+
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            model=config["model"],
+            base_url=config["base_url"],
+            api_key=config["api_key"],
+        )
+
+        if not result:
+            print(f"  [Holistic] LLM returned empty — skipping")
+            return []
+
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            m = re.search(r'\[[\s\S]*\]', result)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except Exception:
+                    print(f"  [Holistic] Could not parse LLM response as JSON")
+                    return []
+            else:
+                print(f"  [Holistic] Could not parse LLM response as JSON")
+                return []
+
+        if not isinstance(parsed, list):
+            print(f"  [Holistic] LLM returned non-array: {type(parsed)}")
+            return []
+
+        findings: list[ProductThinkingFinding] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            insight = item.get("insight", "").strip()
+            if not insight:
+                continue
+            finding = ProductThinkingFinding(
+                description=insight,
+                category=item.get("category", "product_gap"),
+                evidence=item.get("evidence", [])[:3],
+                impact_score=float(item.get("impact", 0.5)),
+                suggested_direction=item.get("suggested_fix", ""),
+                file_path=item.get("repo_path", ""),
+                risk=RiskLevel.MEDIUM,
+                why_now=item.get("why_now", ""),
+            )
+            findings.append(finding)
+
+        print(f"  [Holistic] Found {len(findings)} human-level insights")
+        return findings
 
     def _scan_product_docs(self, repo: Repository) -> list[ProductThinkingFinding]:
         """
