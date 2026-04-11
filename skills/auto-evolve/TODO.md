@@ -237,3 +237,60 @@ auto-evolve verify --repo . --baseline-run-id inspect_20260401
 - 只有 `solved_count < previous_solved_count` 或 `new_critical > 0` 时才通知
 - 做好了 → 静默
 - 退化了 → 通知唐僧
+
+---
+
+## 生态功能（v3.x）
+
+### 11. 扫描成本追踪
+
+**目标**：每次 scan 花了多少 token / 钱
+
+**实现**：
+- 每次 scan 记录 input_tokens、output_tokens、estimated_cost
+- 保存到 scan_history JSON
+- `auto-evolve cost-report` 查看累计成本
+
+---
+
+### 12. 定时扫描
+
+**目标**：cron 定时触发 inspect，不用手动跑
+
+**实现**：
+```bash
+# 设置每日凌晨 3 点自动巡检
+auto-evolve schedule --cron "0 3 * * *" --repo /path/to/repo
+```
+
+---
+
+### 13. 健康度趋势图
+
+**目标**：多次 scan 的分数画成折线图
+
+**实现**：
+- 每次 scan 保存 health_score 到 scan_history
+- `auto-evolve trend --days 30` 生成 ASCII 趋势图
+
+```
+repo: hawk-bridge
+health_score
+0.85 ┤      ╭─╮
+0.80 ┤  ───╯  ╰───
+0.75 ┤
+      ──────────────
+      Apr 10  Apr 12  Apr 14
+```
+
+---
+
+### 14. Auto-fix 集成
+
+**目标**：learnings 的 approvals 自动触发代码修复
+
+**实现**：
+- learnings 中 approved 的 pattern 触发 auto-fix
+- 调用 `auto-evolve fix --pattern CODE-045 --auto`
+- 修复后 verify 确认
+
