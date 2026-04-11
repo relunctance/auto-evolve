@@ -5692,11 +5692,12 @@ def cmd_scan(args) -> int:
     print_product_findings(product_findings)
 
     # v4.2: GitHub integration — post results as PR comment or issue
-    github_event = getattr(args, 'github_event', '') or ""
-    if github_event and product_findings:
-        for repo in repos:
-            repo_path = repo.resolve_path()
-            product_scanner.post_github_comment(repo_path, product_findings, github_event)
+    # DISABLED: removed GitHub issue posting (was causing automatic emails)
+    # github_event = getattr(args, 'github_event', '') or ""
+    # if github_event and product_findings:
+    #     for repo in repos:
+    #         repo_path = repo.resolve_path()
+    #         product_scanner.post_github_comment(repo_path, product_findings, github_event)
 
     # Build plan and report lines
     plan_lines, report_lines, pending_items = _build_plan_and_report(
@@ -6783,10 +6784,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--repo", type=str, default="",
         help="Scan only the specified repository path (default: all configured repos)"
     )
-    scan_p.add_argument(
-        "--github-event", type=str, default="",
-        help="GitHub event type (pr_review, push, manual). When set, results are posted to GitHub."
-    )
+    # DISABLED: GitHub issue posting removed (was causing automatic emails)
+    # scan_p.add_argument(
+    #     "--github-event", type=str, default="",
+    #     help="GitHub event type (pr_review, push, manual). When set, results are posted to GitHub."
+    # )
 
     # confirm
     confirm_p = subparsers.add_parser("confirm", help="Confirm pending changes (semi-auto mode)")
