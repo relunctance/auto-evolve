@@ -1,10 +1,153 @@
 # Persona-aware unified memory — depends on core
 import json
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 from .core import *
+
+
+# ===========================================================
+# Learnings Store — Pattern-based decision replay
+# ===========================================================
+
+# 6-month expiration for stored decisions
+DECISION_EXPIRATION_DAYS = 180
+
+
+@dataclass
+class PatternDecision:
+    """
+    A stored decision for a finding pattern.
+
+    Attributes:
+        pattern_key:   {PERSPECTIVE}_{category}, e.g. "USER_cli_design", "SECURITY_hardcoded_secret"
+        decision:      one of "ignored" | "confirmed" | "modified" | "skipped" | "escalated"
+        finding_summary: short description of the finding type
+        timestamp:     ISO 8601 datetime when the decision was recorded
+        expires_at:    ISO 8601 datetime when this decision expires (6 months)
+    """
+    pattern_key: str
+    decision: str
+    finding_summary: str
+    timestamp: str
+    expires_at: str
+
+    def is_expired(self) -> bool:
+        """Check if this decision has expired (6 months)."""
+        try:
+            exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+            return datetime.now(timezone.utc) > exp
+        except (ValueError, AttributeError):
+            return True
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "PatternDecision":
+        return PatternDecision(
+            pattern_key=d["pattern_key"],
+            decision=d["decision"],
+            finding_summary=d["finding_summary"],
+            timestamp=d["timestamp"],
+            expires_at=d["expires_at"],
+        )
+
+
+class LearningsStore:
+    """
+    Store and replay user decisions for finding patterns.
+
+    Decisions are stored by pattern_key = "{PERSPECTIVE}_{category}".
+    Only "ignored" and "confirmed" decisions are auto-replayed;
+    "skipped" and "escalated" always require fresh user input.
+
+    Storage: ~/.auto-evolve/.learnings/decisions.json
+    """
+
+    def __init__(self, repo_path: Optional[Path] = None) -> None:
+        # Use repo-specific path if given, otherwise home directory
+        if repo_path:
+            base = Path(repo_path).expanduser().resolve()
+        else:
+            base = Path.home()
+        self._store_path = base / ".auto-evolve" / ".learnings" / "decisions.json"
+        self._decisions: dict[str, PatternDecision] = {}
+        self._load()
+
+    def _load(self) -> None:
+        """Load decisions from disk."""
+        if not self._store_path.exists():
+            return
+        try:
+            data = json.loads(self._store_path.read_text(encoding="utf-8"))
+            for key, d in data.items():
+                self._decisions[key] = PatternDecision.from_dict(d)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            self._decisions = {}
+
+    def _save(self) -> None:
+        """Persist decisions to disk."""
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {k: v.to_dict() for k, v in self._decisions.items()}
+        self._store_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def get_decision(self, pattern_key: str) -> Optional[PatternDecision]:
+        """
+        Get the stored decision for a pattern key.
+        Returns None if no decision is stored or if it has expired.
+        """
+        decision = self._decisions.get(pattern_key)
+        if decision is None:
+            return None
+        if decision.is_expired():
+            # Prune expired entry on access
+            del self._decisions[pattern_key]
+            self._save()
+            return None
+        return decision
+
+    def record_decision(
+        self,
+        pattern_key: str,
+        decision: str,
+        finding_summary: str,
+    ) -> None:
+        """
+        Record a user decision for future automatic replay.
+
+        Args:
+            pattern_key:      {PERSPECTIVE}_{category}, e.g. "USER_cli_design"
+            decision:         one of "confirmed" | "modified" | "skipped" | "ignored" | "escalated"
+            finding_summary:  short description of the finding type (for human review)
+        """
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(days=DECISION_EXPIRATION_DAYS)
+        self._decisions[pattern_key] = PatternDecision(
+            pattern_key=pattern_key,
+            decision=decision,
+            finding_summary=finding_summary,
+            timestamp=now.isoformat(),
+            expires_at=expires.isoformat(),
+        )
+        self._save()
+
+    def clear_expired(self) -> int:
+        """Remove all expired decisions. Returns count of removed entries."""
+        before = len(self._decisions)
+        self._decisions = {
+            k: v for k, v in self._decisions.items() if not v.is_expired()
+        }
+        removed = before - len(self._decisions)
+        if removed > 0:
+            self._save()
+        return removed
 
 
 def detect_persona() -> str:

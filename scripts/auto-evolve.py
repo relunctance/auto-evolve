@@ -66,12 +66,16 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
+import logging
+_logger = logging.getLogger(__name__)
+
 # Fix sys.path so we can import from scripts.helpers (for record_learning etc.)
 import sys as _sys
 _script_dir = str(Path(__file__).parent.parent)
 if _script_dir not in _sys.path:
     _sys.path.insert(0, _script_dir)
 from scripts.helpers import record_learning, record_iteration_metrics
+from scripts.memory import LearningsStore
 
 
 # ===========================================================
@@ -135,7 +139,8 @@ class OpenClawMemory:
             results = [row[0] for row in cursor.fetchall() if row[0]]
             conn.close()
             return results
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"OpenClawMemory.search: SQLite error: {e}")
             return []
 
     def get_preferences(self, persona: str) -> dict[str, list[str]]:
@@ -167,7 +172,8 @@ class OpenClawMemory:
             ]
             conn.close()
             return results
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"OpenClawMemory.get_recent: SQLite error: {e}")
             return []
 
 # ===========================================================
@@ -215,14 +221,17 @@ class HawkBridgeMemory:
                             .limit(top_k)
                             .to_list()
                         )
-                    except Exception:
+                    except Exception as e2:
+                        _logger.debug(f"HawkBridgeMemory.search: where clause on '{table_name}' failed: {e2}")
                         results = tbl.search(query).limit(top_k).to_list()
                     texts = [r.get("text", r.get("content", "")) for r in results]
                     return [t for t in texts if t]
-                except Exception:
+                except Exception as e2:
+                    _logger.debug(f"HawkBridgeMemory.search: table '{table_name}' error: {e2}")
                     continue
             return []
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"HawkBridgeMemory.search: LanceDB error: {e}")
             return []
 
     def get_preferences(self, persona: str) -> dict[str, list[str]]:
@@ -600,7 +609,7 @@ class EffectTracker:
                                 count += 1
                                 break
                 except (UnicodeDecodeError, OSError):
-                    pass
+                    _logger.debug(f"count_todos: skip unreadable file {code_file}")
         # Also scan markdown TODO markers
         for md_file in repo_path.rglob("*.md"):
             if ".git" in str(md_file) or ".iterations" in str(md_file):
@@ -613,7 +622,7 @@ class EffectTracker:
                             count += 1
                             break
             except (UnicodeDecodeError, OSError):
-                pass
+                _logger.debug(f"count_todos: skip unreadable markdown {md_file}")
         return count
 
     def count_code_lines(self, repo_path: Path) -> int:
@@ -630,7 +639,7 @@ class EffectTracker:
                         if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
                             total += 1
                 except (UnicodeDecodeError, OSError):
-                    pass
+                    _logger.debug(f"count_code_lines: skip unreadable file {code_file}")
         return total
 
     def count_functions(self, repo_path: Path) -> int:
@@ -643,7 +652,7 @@ class EffectTracker:
                 content = py_file.read_text(encoding="utf-8")
                 count += len(re.findall(r"^(?:async\s+)?def\s+\w+", content, re.MULTILINE))
             except (UnicodeDecodeError, OSError):
-                pass
+                _logger.debug(f"count_functions: skip unreadable file {py_file}")
         return count
 
     def count_duplicate_lines(self, repo_path: Path) -> int:
@@ -660,7 +669,7 @@ class EffectTracker:
                         if len(stripped) > 20 and not stripped.startswith("#") and not stripped.startswith("//"):
                             line_counts[stripped] = line_counts.get(stripped, 0) + 1
                 except (UnicodeDecodeError, OSError):
-                    pass
+                    _logger.debug(f"count_duplicate_lines: skip unreadable file {code_file}")
         return sum(1 for c in line_counts.values() if c >= 3)
 
     def run_lint(self, repo_path: Path) -> int:
@@ -860,7 +869,7 @@ class CostTracker:
                     try:
                         calls.append(json.loads(line))
                     except json.JSONDecodeError:
-                        pass
+                        _logger.warning(f"CostTracker: skip malformed JSON line in {calls_file}")
         return calls
 
 
@@ -1138,8 +1147,8 @@ def get_openclaw_llm_config() -> dict:
             api_key = api_key or cfg.get("api_key", "")
             base_url = base_url or cfg.get("base_url", "")
             model = model or cfg.get("model", "MiniMax-M2")
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.debug(f"get_openclaw_llm_config: openclaw CLI config unavailable: {e}")
 
     # Fallback: read from agents/main/agent/models.json
     if not api_key or not base_url:
@@ -1167,8 +1176,8 @@ def get_openclaw_llm_config() -> dict:
                     obu = openai.get("baseUrl", "")
                     if obu:
                         base_url = obu.rstrip("/") + "/chat/completions"
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                _logger.debug(f"get_openclaw_llm_config: models.json parse error: {e}")
 
     return {"api_key": api_key, "base_url": base_url, "model": model}
 
@@ -1203,7 +1212,8 @@ def call_llm(prompt: str, system: str = "", model: str = "", base_url: str = "",
                     return ""
                 # OpenAI-style response
                 return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"call_llm: endpoint {endpoint} failed: {e}")
             continue
     return ""
 
@@ -1248,8 +1258,8 @@ def analyze_with_llm(code_snippet: str, context: str, repo_path: str = "") -> di
                 if "category" not in parsed:
                     parsed["category"] = "user_complaint"
                 return parsed
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug(f"analyze_with_llm: fallback regex parse failed: {e}")
         return {"suggestion": result.strip()[:200], "risk_level": "medium", "implementation_hint": "", "available": True, "category": "user_complaint"}
 
 
@@ -1305,7 +1315,8 @@ def _rollback_optimization(repo: Repository, file_path: str, before_hash: str) -
             timeout=10,
         )
         return True
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"_rollback_optimization: git checkout failed for {file_path}: {e}")
         return False
 
 
@@ -1328,7 +1339,8 @@ def _get_file_snapshot(repo: Repository, file_path: str) -> tuple[str, str]:
             timeout=5,
         )
         git_hash = result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"_get_file_snapshot: git hash-object failed for {file_path}: {e}")
         git_hash = ""
     return content, git_hash
 
@@ -1985,7 +1997,7 @@ def build_dependency_map(repo_path: Path) -> dict[str, list[str]]:
                     fp.read_text(encoding="utf-8"), str(fp)
                 )
             except (UnicodeDecodeError, OSError):
-                pass
+                _logger.debug(f"build_dependency_map: skip unreadable file {fp}")
     return dep_map
 
 
@@ -2320,13 +2332,13 @@ def load_learnings(persona: str = "") -> dict:
     try:
         with open(p_dir / "approvals.json") as f:
             approvals = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        _logger.debug(f"load_learnings: could not load approvals (may be first run): {e}")
     try:
         with open(p_dir / "rejections.json") as f:
             rejections = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        _logger.debug(f"load_learnings: could not load rejections (may be first run): {e}")
     return {"approvals": approvals, "rejections": rejections}
 
 
@@ -2439,7 +2451,7 @@ def git_commit(repo: Repository, message: str) -> str:
         git_run(repo, "commit", "-m", message)
     else:
         # Nothing to commit, skip
-        pass
+        _logger.debug(f"git_commit: nothing staged to commit in {repo.resolve_path()}")
     hash_result = git_run(repo, "rev-parse", "--short", "HEAD")
     return hash_result.stdout.strip()
 
@@ -2486,8 +2498,8 @@ def compute_file_hash(repo: Repository, file_path: str) -> Optional[str]:
             h = hashlib.sha256()
             h.update(full_path.read_bytes())
             return h.hexdigest()[:12]
-    except OSError:
-        pass
+    except OSError as e:
+        _logger.debug(f"compute_file_hash: could not read {file_path}: {e}")
     return None
 
 
@@ -2507,9 +2519,10 @@ def git_diff_lines_added_removed(repo: Repository) -> tuple[int, int]:
                     lines_added += added
                     lines_removed += removed
                 except ValueError:
-                    pass
+                    _logger.debug(f"git_diff_lines_added_removed: skip malformed numstat line: {line!r}")
         return lines_added, lines_removed
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"git_diff_lines_added_removed: git diff failed: {e}")
         return 0, 0
 
 
@@ -2812,8 +2825,8 @@ def _scan_dependencies(repo_path: Path) -> list[OptimizationFinding]:
                         suggestion="Use semver range (e.g., >=1.0.0,<2.0.0)",
                         risk=RiskLevel.LOW,
                     ))
-        except (UnicodeDecodeError, OSError):
-            pass
+        except (UnicodeDecodeError, OSError) as e:
+            _logger.debug(f"_scan_dependencies: could not read requirements.txt: {e}")
     return findings
 
 
@@ -3029,8 +3042,8 @@ def sanitize_pending_item(item: dict, repo: Repository) -> dict:
                 h = hashlib.sha256()
                 h.update(full_path.read_bytes())
                 sanitized["file_path_hash"] = h.hexdigest()[:12]
-        except OSError:
-            pass
+        except OSError as e:
+            _logger.debug(f"sanitize_pending_item: could not hash {fp}: {e}")
         sanitized["file_path"] = "[REDACTED]"
     sanitized["description"] = "[CLOSED REPO] Change requires manual review"
     sanitized["content_redacted"] = True
@@ -3142,7 +3155,8 @@ def run_llm_analysis_on_changes(
             continue
         try:
             content = fp.read_text(encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"run_llm_analysis_on_changes: could not read {item.file_path}: {e}")
             continue
 
         ctx = f"File: {item.file_path}\nChange type: {item.change_type}\nRisk: {item.risk.value}\nCategory: {item.category.value}"
@@ -3252,8 +3266,8 @@ class FileAnalysisCache:
                 json.dumps(self._memory, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as e:
+            _logger.warning(f"FileAnalysisCache: could not persist cache to {self.CACHE_FILE}: {e}")
 
     def _make_key(self, file_path: str, content: str) -> str:
         """Build a cache key from file path and content hash."""
@@ -3546,8 +3560,13 @@ class FourPerspectiveScanner:
         self.master_summary = self.memory.get_context_summary()
         self.hawk_prefs = self.memory.get_preferences()
         self.effective_persona = self.memory.context_persona
-        self.learnings = self._load_learnings_context()
+        self.learnings_context = self._load_learnings_context()
         self._cache = FileAnalysisCache()
+        # Learnings store for pattern-based decision replay
+        self.learnings_store: Optional[LearningsStore] = None
+        if repos:
+            first_repo = repos[0].resolve_path()
+            self.learnings_store = LearningsStore(repo_path=first_repo)
         # Load project-standard reference docs (评判标准)
         self._project_standard_docs = self._load_project_standard_docs()
         # Data-driven perspective configuration
@@ -3860,13 +3879,13 @@ class FourPerspectiveScanner:
             if approvals_file.exists():
                 try:
                     approvals = json.loads(approvals_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+                except Exception as e:
+                    _logger.debug(f"_load_learnings_context: could not load approvals: {e}")
             if rejections_file.exists():
                 try:
                     rejections = json.loads(rejections_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+                except Exception as e:
+                    _logger.debug(f"_load_learnings_context: could not load rejections: {e}")
             if not approvals and not rejections:
                 return f"No learnings history yet for {self.effective_persona}."
 
@@ -3902,7 +3921,8 @@ class FourPerspectiveScanner:
                     direction = a.get("suggested_direction", "")[:50]
                     parts.append(f"  - 批准[{persp}]: {desc} | 方向: {direction or '(未记录)'}")
             return "\n".join(parts)
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"_load_learnings_context: error loading learnings: {e}")
             return f"No learnings history yet for {self.effective_persona}."
 
     # ---- P1: Scan History Persistence ----------------------------------------
@@ -3934,7 +3954,8 @@ class FourPerspectiveScanner:
                     elif isinstance(v, dict):
                         return v
             return {}
-        except Exception:
+        except Exception as e:
+            _logger.debug(f"_load_scan_history: error loading scan history: {e}")
             return {}
 
     def _save_scan_history(self, repo_path: Path, findings: list["PerspectiveFinding"]) -> None:
@@ -3967,7 +3988,8 @@ class FourPerspectiveScanner:
             if history_file.exists():
                 try:
                     existing = json.loads(history_file.read_text(encoding="utf-8"))
-                except Exception:
+                except Exception as e:
+                    _logger.debug(f"_save_scan_history: could not load existing history: {e}")
                     existing = {}
 
             # Prepend new round, keep last 10
@@ -4052,8 +4074,8 @@ class FourPerspectiveScanner:
                     parts = url.split("github.com/")[1].rstrip(".git").split("/")
                 if len(parts) >= 2:
                     return parts[0], parts[1]
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug(f"_get_github_remote: could not get remote for {repo_path}: {e}")
         return None
 
     def _format_github_comment(self, findings: list["PerspectiveFinding"],
@@ -4158,8 +4180,8 @@ class FourPerspectiveScanner:
                                 f"({delta_str}) since last scan"
                             )
                             return trend_line
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug(f"_compute_trend: error computing trend: {e}")
         return ""
 
     def _post_pr_comment(self, token: str, owner: str, repo: str,
@@ -4242,8 +4264,8 @@ class FourPerspectiveScanner:
                 for issue in issues:
                     if "Auto-Evolve Scan" in issue.get("title", ""):
                         return issue
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug(f"_find_existing_scan_issue: GitHub API error: {e}")
         return None
 
     def _update_issue(self, token: str, owner: str, repo: str,
@@ -4331,7 +4353,56 @@ class FourPerspectiveScanner:
             self._save_scan_history(repo_path, all_findings)
 
         all_findings.sort(key=lambda f: f.impact_score, reverse=True)
+
+        # v4.5: Check learnings store for auto-resolved findings
+        all_findings = self._check_learnings_store(all_findings)
+
         return all_findings
+
+    def _pattern_key_for(self, finding: PerspectiveFinding) -> str:
+        """Build a pattern key for a perspective finding: {PERSPECTIVE}_{category}."""
+        return f"{finding.perspective}_{finding.category}"
+
+    def _auto_ignore(self, finding: PerspectiveFinding) -> None:
+        """Mark a finding as auto-ignored from learnings store."""
+        finding.description = f"[auto-ignored] {finding.description}"
+
+    def _queue_fix(self, finding: PerspectiveFinding) -> None:
+        """Mark a finding for fix execution (auto-confirmed from learnings)."""
+        finding.description = f"[auto-confirmed] {finding.description}"
+
+    def _check_learnings_store(
+        self, findings: list[PerspectiveFinding]
+    ) -> list[PerspectiveFinding]:
+        """
+        Check each finding against the learnings store.
+        Auto-resolve findings with stored 'ignored' or 'confirmed' decisions.
+        Only 'ignored' and 'confirmed' are auto-replayed;
+        'skipped' and 'escalated' always require fresh user input.
+        """
+        if not self.learnings_store:
+            return findings
+
+        auto_resolved_count = 0
+        for finding in findings:
+            pattern_key = self._pattern_key_for(finding)
+            stored = self.learnings_store.get_decision(pattern_key)
+            if not stored:
+                continue
+            if stored.decision == "ignored":
+                self._auto_ignore(finding)
+                auto_resolved_count += 1
+            elif stored.decision == "confirmed":
+                self._queue_fix(finding)
+                auto_resolved_count += 1
+            # 'skipped' and 'escalated' are NOT auto-replayed
+
+        if auto_resolved_count > 0:
+            print(
+                f"\n[Learnings] Auto-resolved {auto_resolved_count} finding(s) "
+                f"from stored decisions"
+            )
+        return findings
 
     def _scan_by_perspective(self, repo: Repository, perspective: str,
                               project_type: str = "通用项目",
@@ -4559,7 +4630,8 @@ class FourPerspectiveScanner:
             if m:
                 try:
                     parsed = json.loads(m.group())
-                except Exception:
+                except Exception as e:
+                    _logger.debug(f"_parse_llm_findings: regex-extract JSON parse failed: {e}")
                     return []
             else:
                 return []
@@ -5115,16 +5187,16 @@ class FourPerspectiveScanner:
                     content = fp.read_text(encoding="utf-8")[:4000]
                     parts.append(f"\n\n=== {fname} (excerpt) ===\n{content}")
                     break
-                except Exception:
-                    pass
+                except Exception as e:
+                    _logger.debug(f"_build_scan_context: could not read {fname}: {e}")
 
         # SKILL.md (first 2000 chars)
         sk = repo_path / "SKILL.md"
         if sk.exists():
             try:
                 parts.append(f"\n\n=== SKILL.md (excerpt) ===\n{sk.read_text(encoding='utf-8')[:2000]}")
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug(f"_build_scan_context: could not read SKILL.md: {e}")
 
         # Main script (first 200 lines)
         main_scripts = list(repo_path.glob("scripts/*.py"))
@@ -5133,8 +5205,8 @@ class FourPerspectiveScanner:
             try:
                 lines = main_script.read_text(encoding="utf-8").splitlines()[:200]
                 parts.append(f"\n\n=== Main script: {main_script.name} (first 200 lines) ===\n" + "\n".join(lines))
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug(f"_build_scan_context: could not read main script {main_script}: {e}")
 
         # Learnings (last 5 approvals + rejections)
         learnings = self.learnings
@@ -5227,7 +5299,8 @@ class FourPerspectiveScanner:
             if m:
                 try:
                     parsed = json.loads(m.group())
-                except Exception:
+                except Exception as e:
+                    _logger.debug(f"_scan_holistic: regex-extract JSON parse failed: {e}")
                     print(f"  [Holistic] Could not parse LLM response as JSON")
                     return []
             else:
@@ -5406,7 +5479,8 @@ class FourPerspectiveScanner:
             if m:
                 try:
                     parsed = json.loads(m.group())
-                except Exception:
+                except Exception as e:
+                    _logger.debug(f"_scan_files_llm_batch: JSON parse failed: {e}")
                     return output
             else:
                 return output
@@ -5570,7 +5644,8 @@ class FourPerspectiveScanner:
             if m:
                 try:
                     parsed = json.loads(m.group())
-                except Exception:
+                except Exception as e:
+                    _logger.debug(f"_scan_dependencies_llm: JSON parse failed: {e}")
                     return {}
             else:
                 return {}
@@ -5670,6 +5745,107 @@ class FourPerspectiveScanner:
                     risk=RiskLevel.LOW,
                 ))
         return findings
+
+
+def _confirm_product_findings(
+    findings: list[PerspectiveFinding],
+    learnings_store: Optional[LearningsStore],
+    dry_run: bool = False,
+) -> int:
+    """
+    Interactive confirmation flow for perspective findings.
+
+    Shows findings that were NOT auto-resolved from learnings store,
+    prompts user for a decision (confirm/skip/ignore/escalate),
+    and records the decision to the learnings store.
+
+    Returns the number of decisions recorded.
+    """
+    if not findings:
+        return 0
+
+    # Filter to non-auto-resolved findings only
+    non_auto = [
+        f for f in findings
+        if not f.description.startswith("[auto-ignored]")
+        and not f.description.startswith("[auto-confirmed]")
+    ]
+
+    if not non_auto:
+        return 0
+
+    # Count auto-resolved
+    auto_count = len(findings) - len(non_auto)
+    if auto_count > 0:
+        print(f"\n[Auto-resolved from learnings: {auto_count} finding(s)]")
+
+    if dry_run:
+        print(f"\n[Dry-run] Would confirm {len(non_auto)} finding(s):")
+        for f in non_auto:
+            print(f"  [{f.perspective}] {f.description[:60]}")
+        return 0
+
+    print(f"\n{'='*60}")
+    print(f"📋 Confirm Perspective Findings ({len(non_auto)} pending)")
+    print(f"{'='*60}")
+    print("Options: [y] confirm  [m] modify  [s] skip  [i] ignore  [e] escalate  [a] confirm all  [q] quit")
+    print()
+
+    decisions_recorded = 0
+    confirmed_all = False
+
+    for idx, f in enumerate(non_auto, 1):
+        pattern_key = f"{f.perspective}_{f.category}"
+        short_desc = f.description[:70].replace("[NEW] ", "")
+
+        print(f"  [{idx}/{len(non_auto)}] [{f.perspective}] {short_desc}")
+        if f.file_path:
+            print(f"      → {f.file_path}")
+        if f.suggested_direction:
+            print(f"      💡 {f.suggested_direction[:60]}")
+
+        if confirmed_all:
+            decision = "confirmed"
+        else:
+            try:
+                user_input = input("  → [y/m/s/i/e/a/q]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n[Aborted]")
+                break
+
+            if user_input in ("q", "quit"):
+                print("[Stopping confirmation]")
+                break
+            elif user_input in ("a", "all"):
+                confirmed_all = True
+                decision = "confirmed"
+            elif user_input in ("y", "yes", ""):
+                decision = "confirmed"
+            elif user_input == "m":
+                decision = "modified"
+            elif user_input == "s":
+                decision = "skipped"
+            elif user_input == "i":
+                decision = "ignored"
+            elif user_input == "e":
+                decision = "escalated"
+            else:
+                print("  Unrecognized input, skipping...")
+                decision = "skipped"
+
+        # Record to learnings store (all decisions are stored for future replay)
+        if learnings_store and decision in ("confirmed", "modified", "skipped", "ignored", "escalated"):
+            learnings_store.record_decision(
+                pattern_key=pattern_key,
+                decision=decision,
+                finding_summary=short_desc,
+            )
+            decisions_recorded += 1
+            print(f"  ✅ Recorded: {decision} ({pattern_key})")
+
+    if decisions_recorded > 0:
+        print(f"\n[Learnings] Recorded {decisions_recorded} decision(s)")
+    return decisions_recorded
 
 
 def print_product_findings(findings: list[PerspectiveFinding]) -> None:
@@ -6518,6 +6694,14 @@ def cmd_scan(args) -> int:
     )
     product_findings = product_scanner.scan()
     print_product_findings(product_findings)
+
+    # v4.5: Interactive confirmation flow for perspective findings + learnings replay
+    if not dry_run:
+        _confirm_product_findings(
+            product_findings,
+            learnings_store=product_scanner.learnings_store,
+            dry_run=dry_run,
+        )
 
     # v4.2: GitHub integration — post results as PR comment or issue
     # DISABLED: removed GitHub issue posting (was causing automatic emails)
