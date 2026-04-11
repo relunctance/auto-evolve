@@ -25,8 +25,11 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, TYPE_CHECKING
 from datetime import datetime, timezone
+
+if TYPE_CHECKING:
+    from skills.fix_engine import FixAction
 
 
 # ─── Data Classes ────────────────────────────────────────────────────────────────
@@ -47,6 +50,7 @@ class Finding:
     auto_actionable: bool
     confidence: float
     status: str = "pending_confirmation"
+    suggested_fix_action: Optional["FixAction"] = None
 
 @dataclass
 class Decision:
@@ -375,11 +379,13 @@ class ConfirmationEngine:
     1. Config loading (which perspectives are active)
     2. Learnings store (decision replay)
     3. User interaction (asking for confirmation)
+    4. FixEngine execution (when user confirms)
     """
 
-    def __init__(self, repo_path: Path, user: str = "tseng"):
+    def __init__(self, repo_path: Path, user: str = "tseng", sender_open_id: str = ""):
         self.repo_path = Path(repo_path)
         self.user = user
+        self.sender_open_id = sender_open_id
         self.config_loader = ConfigLoader(repo_path)
         self.learnings = LearningsStore(repo_path)
 
@@ -481,6 +487,36 @@ class ConfirmationEngine:
 
         return "\n".join(lines)
 
+    def _confirm_and_record(self, finding: Finding, decision: str, notes: str = "") -> str:
+        """
+        Internal: record decision AND trigger FixEngine for confirmed findings.
+        """
+        # Record the decision
+        if decision in ("skipped", "ignored"):
+            self.learnings.record_decision(finding, decision, self.user, notes)
+            if decision == "ignored":
+                self.learnings.record_ignored(finding, self.user, notes)
+        elif decision == "confirmed":
+            self.learnings.record_decision(finding, decision, self.user, notes)
+            # Actually execute the fix via FixEngine
+            if finding.suggested_fix_action:
+                try:
+                    from skills.fix_engine import FixEngine
+                    engine = FixEngine(repo_path=self.repo_path, dry_run=False)
+                    results = engine.execute_batch([finding.suggested_fix_action])
+                    # Log execution results (could extend finding.status with result summary)
+                    success_count = sum(1 for r in results if r.success)
+                    finding.status = f"confirmed_executed:{success_count}/{len(results)}"
+                except Exception as e:
+                    finding.status = f"confirmed_execution_error:{e}"
+            else:
+                finding.status = "confirmed"
+        else:
+            self.learnings.record_decision(finding, decision, self.user, notes)
+            finding.status = decision
+
+        return decision
+
     def process_user_response(
         self,
         finding: Finding,
@@ -523,16 +559,7 @@ class ConfirmationEngine:
         else:
             decision = "modified"
 
-        # Record the decision
-        if decision in ("skipped", "ignored"):
-            self.learnings.record_decision(finding, decision, self.user, notes)
-            if decision == "ignored":
-                self.learnings.record_ignored(finding, self.user, notes)
-        elif decision != "escalated":
-            self.learnings.record_decision(finding, decision, self.user, notes)
-
-        finding.status = decision
-        return decision
+        return self._confirm_and_record(finding, decision, notes)
 
     def batch_confirm(
         self,
@@ -560,73 +587,170 @@ class ConfirmationEngine:
 
 # ─── Feishu Integration ─────────────────────────────────────────────────────────
 
+FEISHU_IM_API = "https://open.feishu.cn/open-apis/im/v1/messages"
+FEISHU_TOKEN_API = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+
+
+def _get_feishu_token() -> Optional[str]:
+    """Get a Feishu tenant access token from app credentials."""
+    app_id = os.environ.get("FEISHU_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    if not app_id or not app_secret:
+        return None
+
+    try:
+        import urllib.request, json
+        data = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+        req = urllib.request.Request(FEISHU_TOKEN_API, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            return result.get("tenant_access_token")
+    except Exception:
+        return None
+
+
+def _send_feishu_message(token: str, receive_id: str, msg_type: str,
+                          content: str, receive_id_type: str = "open_id") -> bool:
+    """Send a Feishu IM message via the REST API."""
+    try:
+        import urllib.request, json
+        url = f"{FEISHU_IM_API}?receive_id_type={receive_id_type}"
+        payload = json.dumps({
+            "receive_id": receive_id,
+            "msg_type": msg_type,
+            "content": content,
+        }).encode()
+        req = urllib.request.Request(url, data=payload, method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            return result.get("code", 0) == 0
+    except Exception as e:
+        print(f"[Feishu] Failed to send message: {e}")
+        return False
+
+
 class FeishuNotifier:
-    """Send confirmation requests to user via Feishu."""
+    """Send confirmation requests to user via Feishu IM API."""
 
-    def __init__(self, chat_id: str = None):
+    def __init__(self, chat_id: str = None, sender_open_id: str = None):
         self.chat_id = chat_id or os.environ.get("FEISHU_CHAT_ID", "")
+        self.sender_open_id = sender_open_id or ""
 
-    def send_confirmation_request(self, engine: ConfirmationEngine, finding: Finding) -> bool:
-        """Send a confirmation request to Feishu."""
-        if not self.chat_id:
+    def send_confirmation_card(self, finding: Finding) -> bool:
+        """
+        Send a single-finding confirmation card via Feishu IM API.
+        Uses the Feishu REST API (urllib.request — same pattern as GitHub API calls).
+        """
+        if not self.sender_open_id:
+            print("[Feishu] No sender_open_id — skipping card send")
             return False
 
         tier = TierClassifier.classify(finding)
         tier_label = {
-            1: "🚫 需要确认",
+            1: "🚫 必须确认",
             2: "⚠️ 需要确认",
-        }.get(tier, "")
+        }.get(tier, "⚠️ 需要确认")
 
-        card = {
-            "msg_type": "interactive",
-            "card": {
-                "header": {
-                    "title": {
-                        "tag": "plain_text",
-                        "content": f"{tier_label} {finding.perspective.upper()}"
-                    },
-                    "template": "red" if finding.severity == "critical" else "orange"
-                },
-                "elements": [
-                    {"tag": "div", "text": {"tag": "lark_md", "content": finding.description}},
-                    {"tag": "hr"},
+        severity_color = "red" if finding.severity == "critical" else "orange"
+
+        card_elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**问题:** {finding.description}"
+                }
+            },
+            {"tag": "hr"},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**严重性:** {finding.severity.upper()} | "
+                        f"**置信度:** {finding.confidence:.0%} | "
+                        f"**影响:** {finding.impact_score:.0%}"
+                    )
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**证据:** {' | '.join(str(e) for e in finding.evidence[:2])}"
+                }
+            },
+            {"tag": "hr"},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**建议修复:** {finding.suggested_fix}"
+                }
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
                     {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"**严重性:** {finding.severity.upper()} | **修复:** {finding.suggested_fix}"
-                        }
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "✅ 确认执行"},
+                        "type": "primary",
+                        "value": {"action": "confirm", "finding_id": finding.id}
                     },
-                    {"tag": "hr"},
                     {
-                        "tag": "action",
-                        "actions": [
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "✅ 确认"},
-                                "type": "primary",
-                                "value": {"action": "confirm", "finding_id": finding.id}
-                            },
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "⏭️ 跳过"},
-                                "type": "default",
-                                "value": {"action": "skip", "finding_id": finding.id}
-                            },
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "🔒 永久忽略"},
-                                "type": "default",
-                                "value": {"action": "ignore", "finding_id": finding.id}
-                            },
-                        ]
-                    }
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "✏️ 修改后执行"},
+                        "type": "default",
+                        "value": {"action": "modified", "finding_id": finding.id}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "⏭️ 跳过"},
+                        "type": "default",
+                        "value": {"action": "skip", "finding_id": finding.id}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔒 永久忽略"},
+                        "type": "default",
+                        "value": {"action": "ignore", "finding_id": finding.id}
+                    },
                 ]
             }
+        ]
+
+        card_content = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"{tier_label} {finding.perspective.upper()}"
+                },
+                "template": severity_color
+            },
+            "elements": card_elements
         }
 
-        # In practice: send via Feishu API
-        return True
+        token = _get_feishu_token()
+        if not token:
+            print("[Feishu] No access token — skipping card send (set FEISHU_APP_ID + FEISHU_APP_SECRET)")
+            return False
+
+        return _send_feishu_message(
+            token=token,
+            receive_id=self.sender_open_id,
+            msg_type="interactive",
+            content=json.dumps(card_content),
+            receive_id_type="open_id"
+        )
+
+    def send_confirmation_request(self, engine: ConfirmationEngine, finding: Finding) -> bool:
+        """Send a confirmation request to Feishu (delegates to send_confirmation_card)."""
+        return self.send_confirmation_card(finding)
 
     def send_batch_confirmation(
         self,
@@ -634,57 +758,84 @@ class FeishuNotifier:
         findings: list[Finding],
         group_key: str
     ) -> bool:
-        """Send a batch confirmation for similar findings."""
-        if not self.chat_id:
+        """Send a batch confirmation for similar findings via Feishu."""
+        if not self.sender_open_id:
             return False
 
-        card = {
-            "msg_type": "interactive",
-            "card": {
-                "header": {
-                    "title": {
-                        "tag": "plain_text",
-                        "content": f"📋 批量确认 ({len(findings)} 个相似问题)"
-                    },
-                    "template": "orange"
+        card_elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"发现 **{len(findings)}** 个相似的 **{findings[0].perspective.upper()}** 问题"
+                    )
+                }
+            },
+            {"tag": "hr"},
+        ]
+
+        for i, f in enumerate(findings[:3], 1):
+            card_elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**{i}.** {f.description[:80]}"}
+            })
+
+        if len(findings) > 3:
+            card_elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"...还有 {len(findings) - 3} 个类似问题"}
+            })
+
+        card_elements.append({"tag": "hr"})
+        card_elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✅ 全部修复"},
+                    "type": "primary",
+                    "value": {"action": "batch_confirm", "group_key": group_key}
                 },
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"发现 {len(findings)} 个相似的 {findings[0].perspective.upper()} 问题"
-                        }
-                    },
-                    {"tag": "hr"},
-                    {
-                        "tag": "action",
-                        "actions": [
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "✅ 全部修复"},
-                                "type": "primary",
-                                "value": {"action": "batch_confirm", "group_key": group_key}
-                            },
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "⏭️ 全部跳过"},
-                                "type": "default",
-                                "value": {"action": "batch_skip", "group_key": group_key}
-                            },
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "🔍 逐个确认"},
-                                "type": "default",
-                                "value": {"action": "逐个确认", "group_key": group_key}
-                            },
-                        ]
-                    }
-                ]
-            }
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "⏭️ 全部跳过"},
+                    "type": "default",
+                    "value": {"action": "batch_skip", "group_key": group_key}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔍 逐个确认"},
+                    "type": "default",
+                    "value": {"action": "逐个确认", "group_key": group_key}
+                },
+            ]
+        })
+
+        card_content = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"📋 批量确认 ({len(findings)} 个相似问题)"
+                },
+                "template": "orange"
+            },
+            "elements": card_elements
         }
 
-        return True
+        token = _get_feishu_token()
+        if not token:
+            print("[Feishu] No access token — skipping batch card send")
+            return False
+
+        return _send_feishu_message(
+            token=token,
+            receive_id=self.sender_open_id,
+            msg_type="interactive",
+            content=json.dumps(card_content),
+            receive_id_type="open_id"
+        )
 
 
 # ─── Quick Test ───────────────────────────────────────────────────────────────

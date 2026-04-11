@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -76,28 +77,47 @@ def call_llm(prompt: str, system: str = "", model: str = "",
     endpoint = base_url.rstrip("/") + "/v1/messages"
     try:
         req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if "anthropic" in endpoint:
-                text_blocks = [
-                    b.get("text", "") for b in data.get("content", [])
-                    if b.get("type") == "text" and b.get("text", "").strip()
-                ]
-                if text_blocks:
-                    content = max(text_blocks, key=len)
-                else:
-                    thinking_blocks = [
-                        b.get("thinking", "") for b in data.get("content", [])
-                        if b.get("type") == "thinking" and b.get("thinking", "").strip()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "anthropic" in endpoint:
+                    text_blocks = [
+                        b.get("text", "") for b in data.get("content", [])
+                        if b.get("type") == "text" and b.get("text", "").strip()
                     ]
-                    content = "\n".join(thinking_blocks)
-            else:
-                content = (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
+                    if text_blocks:
+                        content = max(text_blocks, key=len)
+                    else:
+                        thinking_blocks = [
+                            b.get("thinking", "") for b in data.get("content", [])
+                            if b.get("type") == "thinking" and b.get("thinking", "").strip()
+                        ]
+                        content = "\n".join(thinking_blocks)
+                else:
+                    content = (
+                        data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                return _strip_code_fences(content)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise RuntimeError(
+                    "LLM API认证失败：请检查 OPENAI_API_KEY 是否正确"
                 )
-            return _strip_code_fences(content)
+            elif e.code == 429:
+                raise RuntimeError(
+                    "LLM API超出限额：请稍后再试，或设置 OPENAI_API_KEY"
+                )
+            else:
+                raise RuntimeError(f"LLM API错误 ({e.code})：{e.reason}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"网络连接失败：无法连接到 LLM API。"
+                "请检查网络或设置正确的 API 地址。"
+            )
+    except RuntimeError:
+        raise
     except Exception:
         return ""
 

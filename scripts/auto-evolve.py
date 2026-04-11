@@ -67,6 +67,7 @@ except ImportError:
     YAML_AVAILABLE = False
 
 import logging
+import urllib.error
 _logger = logging.getLogger(__name__)
 
 # Fix sys.path so we can import from scripts.helpers (for record_learning etc.)
@@ -1194,24 +1195,43 @@ def call_llm(prompt: str, system: str = "", model: str = "", base_url: str = "",
         endpoint = base_url.rstrip("/") + endpoint_suffix
         try:
             req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                if "anthropic" in endpoint or endpoint_suffix == "/v1/messages":
-                    text_blocks = [
-                        b.get("text", "") for b in data.get("content", [])
-                        if b.get("type") == "text" and b.get("text", "").strip()
-                    ]
-                    if text_blocks:
-                        return max(text_blocks, key=len)
-                    thinking_blocks = [
-                        b.get("thinking", "") for b in data.get("content", [])
-                        if b.get("type") == "thinking" and b.get("thinking", "").strip()
-                    ]
-                    if thinking_blocks:
-                        return "\n".join(thinking_blocks)
-                    return ""
-                # OpenAI-style response
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if "anthropic" in endpoint or endpoint_suffix == "/v1/messages":
+                        text_blocks = [
+                            b.get("text", "") for b in data.get("content", [])
+                            if b.get("type") == "text" and b.get("text", "").strip()
+                        ]
+                        if text_blocks:
+                            return max(text_blocks, key=len)
+                        thinking_blocks = [
+                            b.get("thinking", "") for b in data.get("content", [])
+                            if b.get("type") == "thinking" and b.get("thinking", "").strip()
+                        ]
+                        if thinking_blocks:
+                            return "\n".join(thinking_blocks)
+                        return ""
+                    # OpenAI-style response
+                    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    raise RuntimeError(
+                        "LLM API认证失败：请检查 OPENAI_API_KEY 是否正确"
+                    )
+                elif e.code == 429:
+                    raise RuntimeError(
+                        "LLM API超出限额：请稍后再试，或设置 OPENAI_API_KEY"
+                    )
+                else:
+                    raise RuntimeError(f"LLM API错误 ({e.code})：{e.reason}")
+            except urllib.error.URLError as e:
+                raise RuntimeError(
+                    f"网络连接失败：无法连接到 LLM API。"
+                    "请检查网络或设置正确的 API 地址。"
+                )
+        except RuntimeError:
+            raise
         except Exception as e:
             _logger.debug(f"call_llm: endpoint {endpoint} failed: {e}")
             continue
@@ -6887,6 +6907,55 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
     return scope, mode, handling
 
 
+# ===========================================================
+# Scan History Persistence (Issue #5)
+# ===========================================================
+
+def _ensure_scan_history_dir() -> Path:
+    """Ensure ~/.auto-evolve/scan-history/ exists."""
+    history_dir = Path.home() / ".auto-evolve" / "scan-history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    return history_dir
+
+
+def write_scan_history(
+    repo_path: Path,
+    findings: list,
+    overall_score: float,
+    scan_mode: str,
+) -> None:
+    """Write scan result to scan history at ~/.auto-evolve/scan-history/."""
+    history_dir = _ensure_scan_history_dir()
+
+    # One file per repo per day
+    today = datetime.now().strftime("%Y-%m-%d")
+    history_file = history_dir / f"{repo_path.name}_{today}.json"
+
+    existing = []
+    if history_file.exists():
+        try:
+            existing = json.loads(history_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = []
+
+    # Compute perspective scores from findings
+    perspective_scores: dict[str, float] = {}
+    for f in findings:
+        if hasattr(f, "perspective") and hasattr(f, "impact_score"):
+            perspective_scores[f.perspective] = f.impact_score
+
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "repo": str(repo_path),
+        "scan_mode": scan_mode,
+        "overall_score": overall_score,
+        "findings_count": len(findings),
+        "perspective_scores": perspective_scores,
+    }
+    existing.append(record)
+    history_file.write_text(json.dumps(existing, indent=2))
+
+
 def cmd_scan(args) -> int:
     """Scan all configured repositories and produce an iteration."""
     config = load_config()
@@ -6953,8 +7022,37 @@ def cmd_scan(args) -> int:
         scan_mode=scan_mode,
         finding_handling=finding_handling,
     )
-    product_findings = product_scanner.scan()
+    try:
+        product_findings = product_scanner.scan()
+    except RuntimeError as e:
+        print(f"❌ 扫描失败: {e}")
+        print("   提示: 请检查 OPENAI_API_KEY / MINIMAX_API_KEY 是否设置正确，或网络连接是否正常")
+        return 1
+    except Exception as e:
+        print(f"❌ 扫描异常: {e}")
+        print("   请查看完整错误: python3 scripts/auto-evolve.py scan ...")
+        return 1
     print_product_findings(product_findings)
+
+    # Issue #5: Persist scan results to ~/.auto-evolve/scan-history/
+    for repo in repos:
+        repo_path = repo.resolve_path()
+        overall_score = 0.0
+        try:
+            # Compute a simple overall score from findings (0.0-1.0 scale)
+            if product_findings:
+                score_sum = sum(
+                    getattr(f, "impact_score", 0.5) for f in product_findings
+                )
+                overall_score = round(score_sum / len(product_findings), 3)
+        except Exception:
+            overall_score = 0.0
+        write_scan_history(
+            repo_path=repo_path,
+            findings=product_findings,
+            overall_score=overall_score,
+            scan_mode=scan_mode,
+        )
 
     # v4.5: Interactive confirmation flow for perspective findings + learnings replay
     if not dry_run:
