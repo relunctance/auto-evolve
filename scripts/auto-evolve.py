@@ -6770,19 +6770,31 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
 
     def show_preview(s: str):
         info = scope_data.get(s, scope_data["required"])
-        extras = info["p_extras"]
-        core = REQUIRED + TYPE_REQ
-        if extras:
-            p_list = ", ".join(core + extras)
+        all_perspectives = REQUIRED + TYPE_REQ + OPTIONAL
+        if s == "all":
+            active = all_perspectives
+        elif s == "required":
+            active = REQUIRED + TYPE_REQ
         else:
-            p_list = ", ".join(core if s != "custom" else ["..."])
-        note = f"({len(REQUIRED)} 必选 + {len(TYPE_REQ)} 类型必选" if is_zh else f"({len(REQUIRED)} required + {len(TYPE_REQ)} type-required)"
+            active = REQUIRED + TYPE_REQ  # default for custom
+
         if is_zh:
-            print(f"\n📌 当前: {info['label']} | 共 {info['count']} 个视角 {note})")
-            print(f"   视角: {p_list}")
+            note = f"({len(REQUIRED)} 必选 + {len(TYPE_REQ)} 类型必选"
+            print(f"\n📌 当前: {info['label']}")
+            print(f"   共 {info['count']} 个视角 {note})")
+            # Print in columns
+            cols = 3
+            rows = [active[i:i+cols] for i in range(0, len(active), cols)]
+            for row in rows:
+                print("   " + "  ".join(f"  • {p:<22}" for p in row))
         else:
-            print(f"\n📌 Current: {info['label']} | {info['count']} perspectives {note})")
-            print(f"   Perspectives: {p_list}")
+            note = f"({len(REQUIRED)} required + {len(TYPE_REQ)} type-required"
+            print(f"\n📌 Current: {info['label']}")
+            print(f"   {info['count']} perspectives {note})")
+            cols = 3
+            rows = [active[i:i+cols] for i in range(0, len(active), cols)]
+            for row in rows:
+                print("   " + "  ".join(f"  • {p:<22}" for p in row))
 
     show_preview("required")
 
