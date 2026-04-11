@@ -294,3 +294,47 @@ health_score
 - 调用 `auto-evolve fix --pattern CODE-045 --auto`
 - 修复后 verify 确认
 
+
+---
+
+## 多租户支持（v4.x）
+
+### MT-1. tenant_id 贯穿所有输出
+
+**目标**：verify/inspect 报告带 tenant_id
+
+```json
+{
+  "run_id": "inspect_20260412",
+  "tenant_id": "self",  // 或 "tenant_xxx"
+  "timestamp": "2026-04-12T00:00:00Z",
+  ...
+}
+```
+
+---
+
+### MT-2. per-tenant 配置目录
+
+**目标**：每个租户有独立的配置
+
+```
+~/.auto-evolve/
+  configs/
+    tenant_{self}/config.yaml
+    tenant_{xxx}/config.yaml
+  scan-history/
+    tenant_{self}/
+    tenant_{xxx}/
+```
+
+---
+
+### MT-3. Multi-tenant Onboarding
+
+**目标**：新租户进来初始化自己的配置
+
+```bash
+auto-evolve init --tenant-id "tenant_xxx" --template "fintech"
+# 从行业模板初始化
+```
