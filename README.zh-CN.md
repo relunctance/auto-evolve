@@ -23,7 +23,7 @@ Auto-Evolve 解决了这一切——**项目会自己变好，不需要你反复
 
 ## 🎯 核心能力
 
-### 四视角智能巡检
+### 19 视角智能巡检
 
 不像其他扫描工具只会报「代码问题」，Auto-Evolve 从四个维度审视项目：
 
@@ -51,7 +51,7 @@ Auto-Evolve 解决了这一切——**项目会自己变好，不需要你反复
 Auto-Evolve 内置了 **project-standard** 作为评判标准库：
 
 ```
-扫描项目 → 检测类型 → 加载对应标准 → 四视角巡检 → 输出报告
+扫描项目 → 检测类型 → 加载对应标准 → 19 视角巡检 → 输出报告
                                     ↓
                      product-requirements.md（产品视角）
                      user-perspective.md  （用户视角）
@@ -171,7 +171,7 @@ python3 scripts/auto-evolve.py schedule --every 10
 
 | Skill | 作用 | 必需 |
 |-------|------|------|
-| **project-standard** | 项目分类 + 四视角标准库 | ✅ |
+| **project-standard** | 项目分类 + 19 视角标准库 | ✅ |
 | **auto-evolve** | 巡检引擎 + 执行器 | ✅ |
 | **soul-force** | learnings 分析 + 每日记忆总结 | 推荐 |
 | **hawk-bridge** | 向量语义记忆，按 persona 隔离 | 可选 |
@@ -191,7 +191,7 @@ auto-evolve scan
 └──────────────────────┬───────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  Step 2: 四视角巡检 × 标准参照                        │
+│  Step 2: 19 视角巡检 × 标准参照                        │
 │                                                      │
 │  👤 USER    → user/user-perspective.md             │
 │  📦 PRODUCT → product-requirements.md               │
@@ -212,7 +212,7 @@ auto-evolve scan
 
 ## 相关项目
 
-- [project-standard](https://github.com/relunctance/gql-openclaw) — 四视角巡检标准库
+- [project-standard](https://github.com/relunctance/gql-openclaw) — 19 视角巡检标准库
 - [SoulForce](https://github.com/relunctance/soul-force) — AI Agent 记忆进化系统
 - [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw 上下文记忆集成
 
