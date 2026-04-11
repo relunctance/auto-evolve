@@ -48,7 +48,6 @@ TOOLS.md
 memory/
 
 # Nested skills (this repo IS the skill, not a container)
-skills/auto-evolve/
 skills/.iterations/
 skills/.learnings/
 
@@ -57,4 +56,5 @@ skills/.learnings/
 !skills/security-scanner/
 !skills/scanner-contract/
 !skills/report-generator/
-!skills/auto-evolve-scanner/
+!skills/confirmation-engine/
+!skills/auto-evolve/
