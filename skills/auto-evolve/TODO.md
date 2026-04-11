@@ -187,3 +187,53 @@ auto-evolve verify
 L5 soul-force
     ↓ 读取验证结果 → 进化
 ```
+
+---
+
+## 细节功能补全（v2.x）
+
+### 7. 增量扫描
+
+**目标**：只扫描距上次有变更的文件，节省 token
+
+**实现**：
+- 记录上次 scan 的文件列表 + 最后修改时间
+- 本次只扫变更文件 + 新增文件
+- `auto-evolve inspect --incremental`
+
+---
+
+### 8. 扫描取消机制
+
+**目标**：发现过多 critical 时中止，避免资源浪费
+
+**实现**：
+```python
+if critical_count > 10:
+    print("🚨 Critical 问题过多（{critical_count}），建议先修阻断性问题")
+    raise ScanAbortException("Too many critical findings")
+```
+
+---
+
+### 9. Verify 对比基准选择
+
+**目标**：可指定 compare-run-id，不只用上一次
+
+**实现**：
+```bash
+auto-evolve verify --repo . --baseline-run-id inspect_20260401
+# 对比 2026-04-01 的 inspect 结果
+```
+
+---
+
+### 10. 回归通知
+
+**目标**：verify 时只有退化了才通知，做好了不打扰
+
+**实现**：
+- verify 结果和上次比
+- 只有 `solved_count < previous_solved_count` 或 `new_critical > 0` 时才通知
+- 做好了 → 静默
+- 退化了 → 通知唐僧
