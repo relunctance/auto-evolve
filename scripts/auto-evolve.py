@@ -6652,58 +6652,194 @@ def _print_iteration_summary(
         print("\n⚠️  Dry-run mode — no changes committed")
 
 
+def _detect_language() -> str:
+    """Detect user's preferred language from environment."""
+    lang = os.environ.get("LANG", "") + os.environ.get("LC_ALL", "")
+    return "zh" if "CN" in lang or "zh" in lang else "en"
+
+
 def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
     """Tier 0: Pre-scan confirmation — ask user what to scan and how to handle findings.
-    
+
     Returns: (scope, mode, handling)
         scope:     "all" | "required" | "custom"
         mode:      "quick" | "full"
         handling:  "report" | "auto_low" | "ask_all"
     """
-    print("\n" + "=" * 50)
-    print("📋 扫描规划确认 / Scan Planning Confirmation")
-    print("=" * 50)
-    print("""
-扫描范围 (scope):
-  1 = 全部 19 视角（完整扫描）
-  2 = Required + Type-Required（日常快速）
-  3 = 自定义（手动指定）
+    lang = _detect_language()
+    is_zh = (lang == "zh")
 
-扫描模式 (mode):
-  Q = Quick Scan（跳过可选视角）
+    # Perspective lists
+    REQUIRED = ["user", "product", "project", "tech", "security", "testing"]
+    TYPE_REQ = ["performance", "integration", "observability", "documentation",
+                "i18n", "accessibility", "reliability", "cost_efficiency",
+                "compatibility", "business_compliance"]
+    OPTIONAL = ["market_influence", "business_sustainability", "industry_vertical"]
+
+    scope_data = {
+        "all": {
+            "label": "全部 19 视角（完整）" if is_zh else "All 19 perspectives (full)",
+            "count": len(REQUIRED) + len(TYPE_REQ) + len(OPTIONAL),
+            "p_extras": OPTIONAL,
+        },
+        "required": {
+            "label": "必选 + 类型必选（日常快速）" if is_zh else "Required + Type-Required (daily)",
+            "count": len(REQUIRED) + len(TYPE_REQ),
+            "p_extras": [],
+        },
+        "custom": {
+            "label": "自定义" if is_zh else "Custom",
+            "count": 0,
+            "p_extras": [],
+        },
+    }
+
+    handling_data = {
+        "report": {
+            "label": "只报告（不修）" if is_zh else "Report only (no fixes)",
+            "desc": ("扫完只输出结果，不会修改任何文件，也不会问你问题"
+                      if is_zh else "Print results only — no files changed, no questions asked"),
+        },
+        "auto_low": {
+            "label": "自动修低风险，问我高风险（推荐）" if is_zh else "Auto-fix low, ask for high (recommended)",
+            "desc": ("低风险自动修，高风险/中风险会问你确认"
+                      if is_zh else "Auto-fix low-risk, ask you for high/medium risk"),
+        },
+        "ask_all": {
+            "label": "每个都问我" if is_zh else "Ask me every finding",
+            "desc": ("每个发现都问你确认，会比较慢但最安全"
+                      if is_zh else "Confirm every finding — thorough but slower"),
+        },
+    }
+
+    def header_zh():
+        return f"""
+{'='*56}
+📋 扫描规划确认 / Scan Planning Confirmation
+{'='*56}
+
+【目标仓库】project-standard（项目巡检标准知识库）
+
+【扫描范围 — scope】
+  1 = 全部 19 视角（完整）
+  2 = 必选 + 类型必选（日常快速）← 默认
+  3 = 自定义
+
+【扫描模式 — mode】
+  Q = Quick Scan（跳过可选视角）← 默认
   F = Full Scan（全部视角）
 
-发现处理 (handling):
+【发现处理 — handling】
   R = 只报告（不修）
-  A = 自动修低风险，问我高风险
+  A = 自动修低风险，问我高风险 ← 默认
   E = 每个都问我
-""")
 
-    # Default values (in case of non-interactive environment)
-    scope = "required"
-    mode = "quick"
-    handling = "auto_low"
+【预估时间】
+  Quick: ~30-60 秒
+  Full:  ~2-5 分钟
+"""
+
+    def header_en():
+        return f"""
+{'='*56}
+📋 Scan Planning Confirmation
+{'='*56}
+
+【Target】project-standard (inspection standards knowledge base)
+
+【Scope — what to scan】
+  1 = All 19 perspectives (full)
+  2 = Required + Type-Required (daily quick) ← default
+  3 = Custom
+
+【Mode — scan depth】
+  Q = Quick (skip optional) ← default
+  F = Full (all perspectives)
+
+【Handling — what to do with findings】
+  R = Report only (no fixes)
+  A = Auto-fix low, ask for high ← default
+  E = Ask me every finding
+
+【Estimated time】
+  Quick: ~30-60 sec
+  Full:  ~2-5 min
+"""
+
+    print(header_zh() if is_zh else header_en())
+
+    def show_preview(s: str):
+        info = scope_data.get(s, scope_data["required"])
+        extras = info["p_extras"]
+        core = REQUIRED + TYPE_REQ
+        if extras:
+            p_list = ", ".join(core + extras)
+        else:
+            p_list = ", ".join(core if s != "custom" else ["..."])
+        note = f"({len(REQUIRED)} 必选 + {len(TYPE_REQ)} 类型必选" if is_zh else f"({len(REQUIRED)} required + {len(TYPE_REQ)} type-required)"
+        if is_zh:
+            print(f"\n📌 当前: {info['label']} | 共 {info['count']} 个视角 {note})")
+            print(f"   视角: {p_list}")
+        else:
+            print(f"\n📌 Current: {info['label']} | {info['count']} perspectives {note})")
+            print(f"   Perspectives: {p_list}")
+
+    show_preview("required")
+
+    # Defaults
+    scope, mode, handling = "required", "quick", "auto_low"
+    scope_label = scope_data["required"]["label"]
 
     try:
-        scope_choice = input("请输入范围 [1/2/3] (默认2): ").strip() or "2"
-        mode_choice = input("请输入模式 [Q/F] (默认Q): ").strip().upper() or "Q"
-        handling_choice = input("请输入处理方式 [R/A/E] (默认A): ").strip().upper() or "A"
+        # Step 1: scope
+        prompt_s = "请输入范围 [1/2/3] (默认2): " if is_zh else "Enter scope [1/2/3] (default=2): "
+        scope_choice = input(f"\n{prompt_s}").strip() or "2"
 
         if scope_choice == "1":
             scope = "all"
         elif scope_choice == "3":
             scope = "custom"
+            prompt_c = "请输入要扫描的视角（逗号分隔）: " if is_zh else "Enter perspectives (comma-separated): "
+            custom = input(f"\n{prompt_c}").strip()
+            # Store custom perspective list in mode for later use
+            mode = custom or "required"
         else:
             scope = "required"
+        scope_label = scope_data.get(scope, scope_data["required"])["label"]
+        show_preview(scope)
 
+        # Step 2: mode
+        prompt_m = "请输入模式 [Q/F] (默认Q): " if is_zh else "Enter mode [Q/F] (default=Q): "
+        mode_choice = input(f"\n{prompt_m}").strip().upper() or "Q"
         mode = "full" if mode_choice == "F" else "quick"
+
+        # Step 3: handling
+        prompt_h = "请输入处理方式 [R/A/E] (默认A): " if is_zh else "Enter handling [R/A/E] (default=A): "
+        handling_choice = input(f"\n{prompt_h}").strip().upper() or "A"
         handling = {"R": "report", "A": "auto_low", "E": "ask_all"}.get(handling_choice, "auto_low")
+        h_info = handling_data[handling]
+
+        if is_zh:
+            print(f"\n📌 处理方式: {h_info['label']}")
+            print(f"   {h_info['desc']}")
+        else:
+            print(f"\n📌 Handling: {h_info['label']}")
+            print(f"   {h_info['desc']}")
 
     except (EOFError, OSError):
-        # Non-interactive (e.g., cron, piping) — use safe defaults
-        print("(非交互模式，使用默认配置: required + quick + auto_low)")
+        msg = "(非交互模式，使用默认配置: required + quick + auto_low)" if is_zh \
+              else "(Non-interactive — using defaults: required + quick + auto_low)"
+        print(f"\n{msg}")
 
-    print(f"\n✅ 确认: scope={scope}, mode={mode}, handling={handling}")
+    if is_zh:
+        print(f"\n✅ 确认: scope={scope} ({scope_label}), mode={mode}, handling={handling}")
+        print("   按回车开始扫描...")
+        input()
+    else:
+        print(f"\n✅ Confirmed: scope={scope} ({scope_label}), mode={mode}, handling={handling}")
+        print("   Press Enter to start scanning...")
+        input()
+
     return scope, mode, handling
 
 
