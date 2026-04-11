@@ -6768,33 +6768,56 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
 
     print(header_zh() if is_zh else header_en())
 
+    # Perspective name map (English → Chinese)
+    PERSPECTIVE_NAMES = {
+        "user": "用户",
+        "product": "产品",
+        "project": "项目",
+        "tech": "技术",
+        "security": "安全",
+        "testing": "测试",
+        "performance": "性能",
+        "integration": "集成",
+        "observability": "可观测性",
+        "documentation": "文档",
+        "i18n": "国际化",
+        "accessibility": "无障碍",
+        "reliability": "可靠性",
+        "cost_efficiency": "成本效率",
+        "compatibility": "兼容性",
+        "market_influence": "市场影响",
+        "business_sustainability": "商业可持续性",
+        "industry_vertical": "行业垂直",
+        "business_compliance": "商业合规",
+    }
+
     def show_preview(s: str):
         info = scope_data.get(s, scope_data["required"])
-        all_perspectives = REQUIRED + TYPE_REQ + OPTIONAL
         if s == "all":
-            active = all_perspectives
+            active = REQUIRED + TYPE_REQ + OPTIONAL
         elif s == "required":
             active = REQUIRED + TYPE_REQ
         else:
-            active = REQUIRED + TYPE_REQ  # default for custom
+            active = REQUIRED + TYPE_REQ
 
         if is_zh:
-            note = f"({len(REQUIRED)} 必选 + {len(TYPE_REQ)} 类型必选"
+            note = f"({len(REQUIRED)} 必选 + {len(TYPE_REQ)} 类型必选)"
             print(f"\n📌 当前: {info['label']}")
-            print(f"   共 {info['count']} 个视角 {note})")
-            # Print in columns
+            print(f"   共 {info['count']} 个视角 {note}")
             cols = 3
             rows = [active[i:i+cols] for i in range(0, len(active), cols)]
             for row in rows:
-                print("   " + "  ".join(f"  • {p:<22}" for p in row))
+                line = "   " + "  ".join(f"  • {p:<20}→{PERSPECTIVE_NAMES[p]:<8}" for p in row)
+                print(line)
         else:
-            note = f"({len(REQUIRED)} required + {len(TYPE_REQ)} type-required"
+            note = f"({len(REQUIRED)} required + {len(TYPE_REQ)} type-required)"
             print(f"\n📌 Current: {info['label']}")
-            print(f"   {info['count']} perspectives {note})")
+            print(f"   {info['count']} perspectives {note}")
             cols = 3
             rows = [active[i:i+cols] for i in range(0, len(active), cols)]
             for row in rows:
-                print("   " + "  ".join(f"  • {p:<22}" for p in row))
+                line = "   " + "  ".join(f"  • {p:<28}" for p in row)
+                print(line)
 
     show_preview("required")
 
