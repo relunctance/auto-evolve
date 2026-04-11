@@ -1,4 +1,4 @@
-# Auto-Evolve v4.3
+# Auto-Evolve v4.4
 
 **Make your projects self-evolve — install once, they keep getting better.**
 
@@ -51,18 +51,41 @@ Auto-detects project type, matches corresponding inspection standards.
 
 ### Seamless project-standard Integration
 
-Auto-Evolve has **project-standard** built in as its evaluation engine:
+Auto-Evolve **reads** project-standard as its evaluation engine:
 
 ```
-Scan project → Detect type → Load standards → Four-perspective scan → Report
-                                       ↓
-                     product-requirements.md (Product)
-                     user-perspective.md   (User)
-                     project-inspection.md (Project)
-                     code-standards.md   (Tech)
+Auto-Evolve (execution engine)     project-standard (knowledge base)
+┌────────────────────────┐        ┌─────────────────────────────┐
+│  Runs scanners         │ reads  │  Perspective definitions     │
+│  Calls LLM             │ ─────► │  Scoring algorithms         │
+│  Generates reports     │        │  Fix action registry       │
+│  Orchestrates fixes    │        │  Config schemas           │
+└────────────────────────┘        └─────────────────────────────┘
+          ↑                                    │
+          │              (read-only, no coupling)
+          └────────────────────────────────────┘
 ```
 
 Not arbitrary judgment — **systematic inspection with standards.**
+
+### Skill Architecture
+
+Auto-Evolve uses a **skill-based architecture** — each perspective is a pluggable skill:
+
+```
+skills/
+├── security-scanner/     ← Security perspective implementation
+│   ├── scanner.py       ← Main scanner class
+│   ├── checks.py        ← Check definitions
+│   └── test_scanner.py  ← Contract tests
+├── scanner-contract/   ← Shared LLM evaluator + base classes
+│   └── llm_evaluator.py
+├── report-generator/   ← Multi-format report generation
+│   └── report_generator.py
+└── SKILL.md           ← Auto-discovered by auto-evolve
+```
+
+**To add a new perspective:** Create a new skill folder, implement `PerspectiveScanner` interface, register it.
 
 ### learnings — Project Memory
 
