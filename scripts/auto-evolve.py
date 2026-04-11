@@ -3551,9 +3551,14 @@ class FourPerspectiveScanner:
     DOC_BATCH_SIZE = 3
 
     def __init__(self, repos: list[Repository], config: dict,
-                 recall_persona: str = "", memory_source: str = "auto") -> None:
+                 recall_persona: str = "", memory_source: str = "auto",
+                 scan_scope: str = "required", scan_mode: str = "quick",
+                 finding_handling: str = "auto_low") -> None:
         self.repos = repos
         self.config = config
+        self.scan_scope = scan_scope        # "all" | "required" | "custom"
+        self.scan_mode = scan_mode          # "quick" | "full"
+        self.finding_handling = finding_handling  # "report" | "auto_low" | "ask_all"
         self.memory = PersonaAwareMemory(
             recall_persona=recall_persona, memory_source=memory_source
         )
@@ -3561,6 +3566,7 @@ class FourPerspectiveScanner:
         self.hawk_prefs = self.memory.get_preferences()
         self.effective_persona = self.memory.context_persona
         self.learnings_context = self._load_learnings_context()
+        self.learnings = self.learnings_context  # used in _gather_context
         self._cache = FileAnalysisCache()
         # Learnings store for pattern-based decision replay
         self.learnings_store: Optional[LearningsStore] = None
@@ -5751,6 +5757,7 @@ def _confirm_product_findings(
     findings: list[PerspectiveFinding],
     learnings_store: Optional[LearningsStore],
     dry_run: bool = False,
+    finding_handling: str = "auto_low",
 ) -> int:
     """
     Interactive confirmation flow for perspective findings.
@@ -5759,9 +5766,17 @@ def _confirm_product_findings(
     prompts user for a decision (confirm/skip/ignore/escalate),
     and records the decision to the learnings store.
 
-    Returns the number of decisions recorded.
+    finding_handling controls behavior:
+      - "report":    only print findings, no interaction
+      - "auto_low":  auto-confirm low-risk, ask for high-risk (default)
+      - "ask_all":   ask for every finding
     """
     if not findings:
+        return 0
+
+    # "report" mode: just print, skip all confirmation
+    if finding_handling == "report":
+        print(f"\n📋 [只报告模式，跳过确认交互]")
         return 0
 
     # Filter to non-auto-resolved findings only
@@ -6637,6 +6652,61 @@ def _print_iteration_summary(
         print("\n⚠️  Dry-run mode — no changes committed")
 
 
+def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
+    """Tier 0: Pre-scan confirmation — ask user what to scan and how to handle findings.
+    
+    Returns: (scope, mode, handling)
+        scope:     "all" | "required" | "custom"
+        mode:      "quick" | "full"
+        handling:  "report" | "auto_low" | "ask_all"
+    """
+    print("\n" + "=" * 50)
+    print("📋 扫描规划确认 / Scan Planning Confirmation")
+    print("=" * 50)
+    print("""
+扫描范围 (scope):
+  1 = 全部 19 视角（完整扫描）
+  2 = Required + Type-Required（日常快速）
+  3 = 自定义（手动指定）
+
+扫描模式 (mode):
+  Q = Quick Scan（跳过可选视角）
+  F = Full Scan（全部视角）
+
+发现处理 (handling):
+  R = 只报告（不修）
+  A = 自动修低风险，问我高风险
+  E = 每个都问我
+""")
+
+    # Default values (in case of non-interactive environment)
+    scope = "required"
+    mode = "quick"
+    handling = "auto_low"
+
+    try:
+        scope_choice = input("请输入范围 [1/2/3] (默认2): ").strip() or "2"
+        mode_choice = input("请输入模式 [Q/F] (默认Q): ").strip().upper() or "Q"
+        handling_choice = input("请输入处理方式 [R/A/E] (默认A): ").strip().upper() or "A"
+
+        if scope_choice == "1":
+            scope = "all"
+        elif scope_choice == "3":
+            scope = "custom"
+        else:
+            scope = "required"
+
+        mode = "full" if mode_choice == "F" else "quick"
+        handling = {"R": "report", "A": "auto_low", "E": "ask_all"}.get(handling_choice, "auto_low")
+
+    except (EOFError, OSError):
+        # Non-interactive (e.g., cron, piping) — use safe defaults
+        print("(非交互模式，使用默认配置: required + quick + auto_low)")
+
+    print(f"\n✅ 确认: scope={scope}, mode={mode}, handling={handling}")
+    return scope, mode, handling
+
+
 def cmd_scan(args) -> int:
     """Scan all configured repositories and produce an iteration."""
     config = load_config()
@@ -6644,6 +6714,14 @@ def cmd_scan(args) -> int:
     mode = get_operation_mode(config)
     rules = get_full_auto_rules(config)
     learnings = load_learnings()
+
+    # ─── Tier 0: Pre-scan confirmation (skip in dry-run for speed) ───────────
+    if dry_run:
+        scan_scope, scan_mode, finding_handling = "required", "quick", "report"
+        print("🔍 [dry-run 模式，跳过预确认，使用: required + quick + report]")
+    else:
+        scan_scope, scan_mode, finding_handling = _confirm_scan_plan(dry_run)
+        print(f"\n📋 扫描策略: {scan_scope} | {scan_mode} | {finding_handling}")
 
     # Filter to a single repo if --repo is specified
     if getattr(args, 'repo', '').strip():
@@ -6691,6 +6769,9 @@ def cmd_scan(args) -> int:
         repos, config,
         recall_persona=getattr(args, 'recall_persona', '') or '',
         memory_source=getattr(args, 'memory_source', 'auto') or 'auto',
+        scan_scope=scan_scope,
+        scan_mode=scan_mode,
+        finding_handling=finding_handling,
     )
     product_findings = product_scanner.scan()
     print_product_findings(product_findings)
@@ -6701,6 +6782,7 @@ def cmd_scan(args) -> int:
             product_findings,
             learnings_store=product_scanner.learnings_store,
             dry_run=dry_run,
+            finding_handling=finding_handling,
         )
 
     # v4.2: GitHub integration — post results as PR comment or issue
