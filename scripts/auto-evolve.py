@@ -1129,63 +1129,40 @@ class SmartScheduler:
 # ===========================================================
 
 def get_openclaw_llm_config() -> dict:
-    """
-    Read OpenClaw LLM configuration from environment, openclaw CLI, or models.json.
-    Priority: env vars > models.json > openclaw config get llm
-    """
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("MINIMAX_API_KEY", "")
-    base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("MINIMAX_BASE_URL", "")
-    model = os.environ.get("OPENAI_MODEL") or os.environ.get("MINIMAX_MODEL", "MiniMax-M2")
+    """Get LLM config, using zero-config auto-discover from OpenClaw.
 
-    # Try openclaw config get llm (may not exist in all versions)
+    Priority: explicit args > env vars > OpenClaw auto-discover.
+    Delegates to scripts.llm_config.resolve_llm_config() internally.
+    """
+    import os as _os
+    from scripts.llm_config import resolve_llm_config
     try:
-        result = subprocess.run(
-            ["openclaw", "config", "get", "llm"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            cfg = json.loads(result.stdout)
-            api_key = api_key or cfg.get("api_key", "")
-            base_url = base_url or cfg.get("base_url", "")
-            model = model or cfg.get("model", "MiniMax-M2")
-    except Exception as e:
-        _logger.debug(f"get_openclaw_llm_config: openclaw CLI config unavailable: {e}")
+        config = resolve_llm_config()
+        return {
+            "api_key": config.get("api_key", ""),
+            "base_url": config.get("base_url", ""),
+            "model": config.get("model", "MiniMax-M2"),
+        }
+    except RuntimeError:
+        # Fallback for backward compat (return empty = no config)
+        return {"api_key": "", "base_url": "", "model": "MiniMax-M2"}
 
-    # Fallback: read from agents/main/agent/models.json
-    if not api_key or not base_url:
-        models_file = HOME / ".openclaw" / "agents" / "main" / "agent" / "models.json"
-        if models_file.exists():
-            try:
-                data = json.loads(models_file.read_text())
-                providers = data.get("providers", {})
-                # Try minimax provider first
-                minimax = providers.get("minimax", {})
-                if not api_key:
-                    api_key = minimax.get("apiKey", "")
-                if not base_url:
-                    base_url = minimax.get("baseUrl", "")
-                    if base_url:
-                        # The baseUrl is like https://api.minimaxi.com/anthropic
-                        # The /v1/messages suffix is added by _call_llm_for_refactor
-                        base_url = base_url.rstrip("/")
-                # Also try openai provider
-                if not api_key:
-                    openai = providers.get("openai", {})
-                    api_key = openai.get("apiKey", "")
-                if not base_url:
-                    openai = providers.get("openai", {})
-                    obu = openai.get("baseUrl", "")
-                    if obu:
-                        base_url = obu.rstrip("/") + "/chat/completions"
-            except (json.JSONDecodeError, OSError) as e:
-                _logger.debug(f"get_openclaw_llm_config: models.json parse error: {e}")
-
-    return {"api_key": api_key, "base_url": base_url, "model": model}
 
 
 def call_llm(prompt: str, system: str = "", model: str = "", base_url: str = "", api_key: str = "") -> str:
+    # Zero-config: auto-discover from OpenClaw if no explicit config provided
     if not api_key or not base_url:
-        return ""
+        from scripts.llm_config import resolve_llm_config
+        try:
+            config = resolve_llm_config()
+            base_url = base_url or config["base_url"]
+            api_key = api_key or config["api_key"]
+            model = model or config["model"]
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"LLM配置未找到：{e}\n"
+                "请设置 OPENAI_API_KEY 或确保 OpenClaw 已配置默认模型。"
+            )
     import urllib.request
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
     messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
