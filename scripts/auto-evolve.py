@@ -6671,20 +6671,20 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
 
     # Perspective lists
     REQUIRED = ["user", "product", "project", "tech", "security", "testing"]
-    TYPE_REQ = ["performance", "integration", "observability", "documentation",
+    OPTIONAL = ["performance", "integration", "observability", "documentation",
                 "i18n", "accessibility", "reliability", "cost_efficiency",
-                "compatibility", "business_compliance"]
-    OPTIONAL = ["market_influence", "business_sustainability", "industry_vertical"]
+                "compatibility", "business_compliance",
+                "market_influence", "business_sustainability", "industry_vertical"]
 
     scope_data = {
         "all": {
             "label": "全部 19 视角（完整）" if is_zh else "All 19 perspectives (full)",
-            "count": len(REQUIRED) + len(TYPE_REQ) + len(OPTIONAL),
+            "count": len(REQUIRED) + len(OPTIONAL),
             "p_extras": OPTIONAL,
         },
         "required": {
-            "label": "必选 + 类型必选（日常快速）" if is_zh else "Required + Type-Required (daily)",
-            "count": len(REQUIRED) + len(TYPE_REQ),
+            "label": "必选 + 可选（日常快速）" if is_zh else "Required + Type-Required (daily)",
+            "count": len(REQUIRED) + len(OPTIONAL),
             "p_extras": [],
         },
         "custom": {
@@ -6722,7 +6722,7 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
 
 【扫描范围 — scope】
   1 = 全部 19 视角（完整）
-  2 = 必选 + 类型必选（日常快速）← 默认
+  2 = 必选 + 可选（日常快速）← 默认
   3 = 自定义
 
 【扫描模式 — mode】
@@ -6794,14 +6794,14 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
     def show_preview(s: str):
         info = scope_data.get(s, scope_data["required"])
         if s == "all":
-            active = REQUIRED + TYPE_REQ + OPTIONAL
+            active = REQUIRED + OPTIONAL
             extras = []
         elif s == "required":
             active = REQUIRED
-            extras = TYPE_REQ
+            extras = OPTIONAL
         else:
             active = REQUIRED
-            extras = TYPE_REQ
+            extras = OPTIONAL
 
         def fmt(p: str, tag: str) -> str:
             zh = PERSPECTIVE_NAMES[p]
@@ -6813,7 +6813,7 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
             for p in active:
                 print(fmt(p, "必选"))
             for p in extras:
-                print(fmt(p, "类型必选"))
+                print(fmt(p, "可选"))
             if s == "all":
                 for p in OPTIONAL:
                     print(fmt(p, "可选"))
