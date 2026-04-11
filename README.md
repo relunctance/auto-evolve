@@ -26,13 +26,13 @@ Auto-Evolve fixes all of this — **projects get better on their own, without co
 
 ## 🎯 Core Capabilities
 
-### Five-Perspective Smart Inspection
+### Four-Perspective Smart Inspection
 
-Unlike other scanners that only report "code problems," Auto-Evolve examines projects from five dimensions:
+Unlike other scanners that only report "code problems," Auto-Evolve examines projects from four dimensions:
 
 ```
-👤 User      📦 Product      🏗 Project      ⚙️ Tech      📊 Market
-"Usable?"  "Delivered?"   "Healthy?"    "Clean code?"  "Visible?"
+👤 User      📦 Product      🏗 Project      ⚙️ Tech
+"Usable?"  "Delivered?"   "Healthy?"    "Clean code?"
 ```
 
 Each dimension has different weights, dynamically adjusted based on project type.
@@ -54,13 +54,12 @@ Auto-detects project type, matches corresponding inspection standards.
 Auto-Evolve has **project-standard** built in as its evaluation engine:
 
 ```
-Scan project → Detect type → Load standards → Five-perspective scan → Report
+Scan project → Detect type → Load standards → Four-perspective scan → Report
                                        ↓
                      product-requirements.md (Product)
                      user-perspective.md   (User)
                      project-inspection.md (Project)
                      code-standards.md   (Tech)
-                     market/market-perspective.md (Market)
 ```
 
 Not arbitrary judgment — **systematic inspection with standards.**
@@ -178,14 +177,14 @@ Three layers stacked, Auto-Evolve gets better with every use.
 
 | Skill | Role | Required |
 |-------|------|---------|
-| **project-standard** | Project taxonomy + five-perspective standards | ✅ |
+| **project-standard** | Project taxonomy + four-perspective standards | ✅ |
 | **auto-evolve** | Inspection engine + executor | ✅ |
 | **soul-force** | learnings analysis + daily memory summary | Recommended |
 | **hawk-bridge** | Vector semantic memory, persona-isolated | Optional |
 
 ---
 
-## How It Works (v4.4)
+## How It Works (v4.3)
 
 ```
 auto-evolve scan
@@ -204,7 +203,6 @@ auto-evolve scan
 │  📦 PRODUCT → product-requirements.md              │
 │  🏗 PROJECT → project-inspection.md              │
 │  ⚙️ TECH   → code-standards.md                 │
-│  📊 MARKET  → market/market-perspective.md        │
 └──────────────────────┬───────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
@@ -221,7 +219,7 @@ auto-evolve scan
 
 ## Related Projects
 
-- [project-standard](https://github.com/relunctance/project-standard) — Five-perspective inspection standard library
+- [project-standard](https://github.com/relunctance/project-standard) — Four-perspective inspection standard library
 - [SoulForce](https://github.com/relunctance/soul-force) — AI Agent memory evolution system
 - [hawk-bridge](https://github.com/relunctance/hawk-bridge) — OpenClaw context memory integration
 
