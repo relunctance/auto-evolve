@@ -6795,29 +6795,38 @@ def _confirm_scan_plan(dry_run: bool) -> tuple[str, str, str]:
         info = scope_data.get(s, scope_data["required"])
         if s == "all":
             active = REQUIRED + TYPE_REQ + OPTIONAL
+            extras = []
         elif s == "required":
-            active = REQUIRED + TYPE_REQ
+            active = REQUIRED
+            extras = TYPE_REQ
         else:
-            active = REQUIRED + TYPE_REQ
+            active = REQUIRED
+            extras = TYPE_REQ
+
+        def fmt(p: str, tag: str) -> str:
+            zh = PERSPECTIVE_NAMES[p]
+            return f"  • {p} ({zh}视角)  {tag}"
 
         if is_zh:
-            note = f"({len(REQUIRED)} 必选 + {len(TYPE_REQ)} 类型必选)"
             print(f"\n📌 当前: {info['label']}")
-            print(f"   共 {info['count']} 个视角 {note}")
-            cols = 3
-            rows = [active[i:i+cols] for i in range(0, len(active), cols)]
-            for row in rows:
-                line = "   " + "  ".join(f"  • {p:<20}→{PERSPECTIVE_NAMES[p]:<8}" for p in row)
-                print(line)
+            print(f"   共 {info['count']} 个视角")
+            for p in active:
+                print(fmt(p, "必选"))
+            for p in extras:
+                print(fmt(p, "类型必选"))
+            if s == "all":
+                for p in OPTIONAL:
+                    print(fmt(p, "可选"))
         else:
-            note = f"({len(REQUIRED)} required + {len(TYPE_REQ)} type-required)"
             print(f"\n📌 Current: {info['label']}")
-            print(f"   {info['count']} perspectives {note}")
-            cols = 3
-            rows = [active[i:i+cols] for i in range(0, len(active), cols)]
-            for row in rows:
-                line = "   " + "  ".join(f"  • {p:<28}" for p in row)
-                print(line)
+            print(f"   {info['count']} perspectives")
+            for p in active:
+                print(fmt(p, "required"))
+            for p in extras:
+                print(fmt(p, "type-required"))
+            if s == "all":
+                for p in OPTIONAL:
+                    print(fmt(p, "optional"))
 
     show_preview("required")
 
