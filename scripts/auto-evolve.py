@@ -58,7 +58,13 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict
+
+try:
+    import yaml  # pip install pyyaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 
 # Fix sys.path so we can import from scripts.helpers (for record_learning etc.)
 import sys as _sys
@@ -3275,29 +3281,255 @@ class FileAnalysisCache:
 
 
 # ===========================================================
-# FourPerspectiveScanner (v3.9)
-# Asks: "这个项目还有什么可以改进的？" from four distinct angles:
-#   👤 USER    — Is it easy/best to use?
-#   📦 PRODUCT — Does it actually solve what it claims?
-#   🏗 PROJECT — Is it运作得好 (learnings, schedule, config)?
-#   ⚙️ TECH   — Is the code healthy?
+# Perspective Configuration Loader (v4.0+)
+# Reads perspective-config.yaml and provides a data-driven
+# perspective registry with backward-compat fallback.
 # ===========================================================
 
-# Perspective labels and display info
+# Default perspective display metadata (kept for backward compat)
 PERSPECTIVE_META = {
-    "USER":    {"icon": "👤", "label": "用户视角", "stars": 5},
-    "PRODUCT": {"icon": "📦", "label": "产品视角", "stars": 4},
-    "PROJECT": {"icon": "🏗", "label": "项目视角", "stars": 3},
-    "TECH":    {"icon": "⚙️", "label": "技术视角", "stars": 2},
+    "USER":    {"icon": "👤", "label": "用户视角", "stars": 5,  "color": "#3B82F6"},
+    "PRODUCT": {"icon": "📦", "label": "产品视角", "stars": 4,  "color": "#8B5CF6"},
+    "PROJECT": {"icon": "🏗", "label": "项目视角", "stars": 3,  "color": "#F59E0B"},
+    "TECH":    {"icon": "⚙️", "label": "技术视角", "stars": 2,  "color": "#10B981"},
+    # Level 1
+    "SECURITY":    {"icon": "🔒", "label": "安全视角",     "stars": 5,  "color": "#EF4444"},
+    "TESTING":     {"icon": "🧪", "label": "测试视角",     "stars": 4,  "color": "#06B6D4"},
+    "COMPATIBILITY":{"icon": "🔄", "label": "兼容性视角",   "stars": 3,  "color": "#84CC16"},
+    # Level 2
+    "INTEGRATION":        {"icon": "🔗", "label": "集成视角",           "stars": 3,  "color": "#F97316"},
+    "OBSERVABILITY":      {"icon": "📊", "label": "可观测性视角",       "stars": 3,  "color": "#EC4899"},
+    "RELIABILITY":        {"icon": "🛡", "label": "可靠性视角",         "stars": 3,  "color": "#14B8A6"},
+    "COST_EFFICIENCY":    {"icon": "💰", "label": "成本效率视角",       "stars": 2,  "color": "#A855F7"},
+    "MARKET_INFLUENCE":   {"icon": "📈", "label": "市场影响视角",       "stars": 2,  "color": "#0EA5E9"},
+    "BUSINESS_SUSTAINABILITY": {"icon": "🌱", "label": "商业可持续性视角", "stars": 2,  "color": "#22C55E"},
+    "INDUSTRY_VERTICAL":  {"icon": "🏭", "label": "行业垂直视角",       "stars": 2,  "color": "#64748B"},
+    "BUSINESS_COMPLIANCE":{"icon": "⚖️", "label": "商业合规视角",       "stars": 3,  "color": "#78716C"},
+    # Level 3
+    "DOCUMENTATION": {"icon": "📚", "label": "文档视角",  "stars": 4,  "color": "#0D9488"},
+    "I18N":          {"icon": "🌍", "label": "国际化视角", "stars": 3,  "color": "#2DD4BF"},
+    "ACCESSIBILITY": {"icon": "♿", "label": "可访问性视角", "stars": 3, "color": "#FACC15"},
 }
+
+
+@dataclass
+class PerspectiveDef:
+    """Definition of a single perspective from the config."""
+    name: str
+    display_name: str
+    icon: str
+    color: str
+    execution_level: int
+    priority: int
+    scanner_type: str          # "llm" | "static" | "hybrid"
+    doc_path: str              # relative path within project-standard
+    llm_focus: str             # Chinese description of what this perspective checks
+    categories: list[str]
+    default_weight: float
+    enabled: bool = True
+
+
+class PerspectiveConfig:
+    """
+    Loads and provides access to the perspective configuration.
+
+    Attempts to load from `perspective-config.yaml` in the skill directory.
+    Falls back to the built-in 4-perspective default if the file is absent
+    or YAML is not available.
+
+    Execution levels:
+      Level 0: USER, PRODUCT, PROJECT, TECH  (core — parallel)
+      Level 1: SECURITY, TESTING, COMPATIBILITY  (quality gates — depends on L0)
+      Level 2: INTEGRATION, OBSERVABILITY, RELIABILITY, COST_EFFICIENCY,
+                MARKET_INFLUENCE, BUSINESS_SUSTAINABILITY, INDUSTRY_VERTICAL,
+                BUSINESS_COMPLIANCE  (operational — parallel after L0)
+      Level 3: DOCUMENTATION, I18N, ACCESSIBILITY  (delivery — last)
+    """
+
+    # 19 perspective names in canonical order
+    ALL_PERSPECTIVE_NAMES = [
+        # Level 0
+        "USER", "PRODUCT", "PROJECT", "TECH",
+        # Level 1
+        "SECURITY", "TESTING", "COMPATIBILITY",
+        # Level 2
+        "INTEGRATION", "OBSERVABILITY", "RELIABILITY", "COST_EFFICIENCY",
+        "MARKET_INFLUENCE", "BUSINESS_SUSTAINABILITY", "INDUSTRY_VERTICAL", "BUSINESS_COMPLIANCE",
+        # Level 3
+        "DOCUMENTATION", "I18N", "ACCESSIBILITY",
+    ]
+
+    def __init__(self, config_path: Optional[Path] = None) -> None:
+        self._perspectives: Dict[str, PerspectiveDef] = {}
+        self._levels: Dict[int, list[str]] = {}
+        self._load(config_path)
+
+    def _load(self, config_path: Optional[Path]) -> None:
+        """Load from YAML or fall back to built-in 4-perspective default."""
+        # Try to find the config file
+        if config_path is None:
+            candidates = [
+                Path(__file__).parent.parent / "perspective-config.yaml",
+                Path.home() / ".openclaw" / "workspace" / "skills" / "auto-evolve" / "perspective-config.yaml",
+            ]
+            for c in candidates:
+                if c.exists():
+                    config_path = c
+                    break
+
+        data: Optional[dict] = None
+        if config_path and config_path.exists() and YAML_AVAILABLE:
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                print(f"[PerspectiveConfig] Loaded from {config_path}")
+            except Exception as e:
+                print(f"[PerspectiveConfig] Failed to load {config_path}: {e} — using fallback")
+
+        if data is None:
+            print("[PerspectiveConfig] Using built-in 4-perspective fallback")
+            data = self._get_builtin_fallback()
+
+        # Build execution levels
+        for level_data in data.get("execution_levels", []):
+            lvl = level_data["level"]
+            self._levels[lvl] = level_data["perspectives"]
+
+        # Build perspective registry
+        persp_data = data.get("perspectives", {})
+        for name in self.ALL_PERSPECTIVE_NAMES:
+            p = persp_data.get(name, {})
+            if not p:
+                # Skip if not defined
+                continue
+            self._perspectives[name] = PerspectiveDef(
+                name=name,
+                display_name=p.get("display_name", name),
+                icon=PERSPECTIVE_META.get(name, {}).get("icon", "📋"),
+                color=p.get("color", "#888888"),
+                execution_level=p.get("execution_level", 0),
+                priority=p.get("priority", 99),
+                scanner_type=p.get("scanner_type", "llm"),
+                doc_path=p.get("doc_path", ""),
+                llm_focus=p.get("llm_focus", ""),
+                categories=p.get("categories", []),
+                default_weight=p.get("default_weight", 0.20),
+                enabled=p.get("enabled", True),
+            )
+
+    def _get_builtin_fallback(self) -> dict:
+        """Return the 4-perspective default (backward compatibility)."""
+        return {
+            "execution_levels": [
+                {"level": 0, "perspectives": ["USER", "PRODUCT", "PROJECT", "TECH"]},
+            ],
+            "perspectives": {
+                "USER": {
+                    "display_name": "用户视角", "icon": "👤", "color": "#3B82F6",
+                    "execution_level": 0, "priority": 1, "scanner_type": "llm",
+                    "doc_path": "references/user/user-perspective.md",
+                    "llm_focus": "CLI设计、错误提示、上手门槛、容错性、操作流程度",
+                    "categories": ["cli_design", "error_message", "learning_curve", "fault_tolerance", "workflow"],
+                    "default_weight": 0.25, "enabled": True,
+                },
+                "PRODUCT": {
+                    "display_name": "产品视角", "icon": "📦", "color": "#8B5CF6",
+                    "execution_level": 0, "priority": 2, "scanner_type": "llm",
+                    "doc_path": "references/product/product-perspective.md",
+                    "llm_focus": "README承诺兑现、文档与代码一致性、功能完整性、缺失功能",
+                    "categories": ["pain_point_unresolved", "partial_solution", "missing_feature", "wrong_approach"],
+                    "default_weight": 0.25, "enabled": True,
+                },
+                "PROJECT": {
+                    "display_name": "项目视角", "icon": "🏗", "color": "#F59E0B",
+                    "execution_level": 0, "priority": 3, "scanner_type": "llm",
+                    "doc_path": "references/project/project-perspective.md",
+                    "llm_focus": "learnings闭环、巡检节奏、配置合理性、依赖健康度、Git实践",
+                    "categories": ["learnings_gap", "scan_rhythm", "config_issue", "dependency_issue"],
+                    "default_weight": 0.25, "enabled": True,
+                },
+                "TECH": {
+                    "display_name": "技术视角", "icon": "⚙️", "color": "#10B981",
+                    "execution_level": 0, "priority": 4, "scanner_type": "hybrid",
+                    "doc_path": "references/tech/tech-perspective.md",
+                    "llm_focus": "代码质量(重复/长函数)、安全漏洞、性能问题、异常处理",
+                    "categories": ["security", "performance", "code_quality", "error_handling"],
+                    "default_weight": 0.25, "enabled": True,
+                },
+            },
+        }
+
+    def get_levels(self) -> Dict[int, list[str]]:
+        """Return execution levels as {level: [perspective_names]}."""
+        return self._levels
+
+    def get_perspective(self, name: str) -> Optional[PerspectiveDef]:
+        """Return a single perspective definition."""
+        return self._perspectives.get(name)
+
+    def get_active_perspectives(self) -> list[str]:
+        """Return all enabled perspective names in priority order."""
+        sorted_persps = sorted(
+            self._perspectives.values(),
+            key=lambda p: (p.execution_level, p.priority)
+        )
+        return [p.name for p in sorted_persps if p.enabled]
+
+    def get_perspectives_by_level(self, level: int) -> list[str]:
+        """Return perspective names for a given execution level."""
+        return self._levels.get(level, [])
+
+    def get_perspective_names(self) -> list[str]:
+        """Return all registered perspective names."""
+        return list(self._perspectives.keys())
+
+    def project_weights(self, project_type: str) -> Dict[str, float]:
+        """
+        Return per-perspective weights for a project type.
+        For v4.0, all perspectives get equal weight by default;
+        project-standard can override this later.
+        """
+        active = self.get_active_perspectives()
+        if not active:
+            return {}
+        # Equal weight distribution
+        base = 1.0 / len(active)
+        return {p: base for p in active}
+
+
+# Global singleton (lazy-loaded on first use)
+_perspective_config: Optional[PerspectiveConfig] = None
+
+
+def get_perspective_config() -> PerspectiveConfig:
+    """Get or create the global PerspectiveConfig singleton."""
+    global _perspective_config
+    if _perspective_config is None:
+        _perspective_config = PerspectiveConfig()
+    return _perspective_config
+
+
+# ===========================================================
+# FourPerspectiveScanner (v3.9) — now data-driven via PerspectiveConfig
+# Asks: "这个项目还有什么可以改进的？" from N perspectives:
+#   Level 0: USER / PRODUCT / PROJECT / TECH  (core foundations)
+#   Level 1: SECURITY / TESTING / COMPATIBILITY  (quality gates)
+#   Level 2: INTEGRATION / OBSERVABILITY / RELIABILITY / COST_EFFICIENCY
+#            MARKET_INFLUENCE / BUSINESS_SUSTAINABILITY / INDUSTRY_VERTICAL
+#            BUSINESS_COMPLIANCE  (operational excellence)
+#   Level 3: DOCUMENTATION / I18N / ACCESSIBILITY  (delivery quality)
+# ===========================================================
 
 
 class FourPerspectiveScanner:
     """
-    Runs four scanners concurrently (conceptually), one per perspective.
+    Data-driven multi-perspective scanner (19 perspectives).
+
+    Reads perspective definitions from perspective-config.yaml and
+    runs scanners in dependency order (execution levels 0→3).
 
     Each perspective asks a different question and produces findings
-    tagged with its perspective label.  Findings are later grouped
+    tagged with its perspective label. Findings are later grouped
     and displayed by perspective in the report.
     """
 
@@ -3318,19 +3550,38 @@ class FourPerspectiveScanner:
         self._cache = FileAnalysisCache()
         # Load project-standard reference docs (评判标准)
         self._project_standard_docs = self._load_project_standard_docs()
+        # Data-driven perspective configuration
+        self._persp_config = get_perspective_config()
 
     # ---- project-standard integration ---------------------------------------
 
-    # Map each perspective to its reference doc
-    PERSPECTIVE_REF_DOCS = {
+    # Map each perspective to its reference doc (19 perspectives)
+    PERSPECTIVE_REF_DOCS: dict[str, str] = {
+        # Level 0
         "USER":    "references/user/user-perspective.md",
-        "PRODUCT": "references/product-requirements.md",
-        "PROJECT": "references/project-inspection.md",
-        "TECH":    "references/code-standards.md",
+        "PRODUCT": "references/product/product-perspective.md",
+        "PROJECT": "references/project/project-perspective.md",
+        "TECH":    "references/tech/tech-perspective.md",
+        # Level 1
+        "SECURITY":    "references/security/security-perspective.md",
+        "TESTING":     "references/testing/testing-perspective.md",
+        "COMPATIBILITY":"references/compatibility/compatibility-perspective.md",
+        # Level 2
+        "INTEGRATION":        "references/integration/integration-perspective.md",
+        "OBSERVABILITY":      "references/observability/observability-perspective.md",
+        "RELIABILITY":        "references/reliability/reliability-perspective.md",
+        "COST_EFFICIENCY":    "references/cost_efficiency/cost-efficiency-perspective.md",
+        "MARKET_INFLUENCE":   "references/market_influence/market-influence-perspective.md",
+        "BUSINESS_SUSTAINABILITY": "references/business_sustainability/business-sustainability-perspective.md",
+        "INDUSTRY_VERTICAL":  "references/industry_vertical/industry-vertical-perspective.md",
+        "BUSINESS_COMPLIANCE":"references/business_compliance/business-compliance-perspective.md",
+        # Level 3
+        "DOCUMENTATION": "references/documentation/documentation-perspective.md",
+        "I18N":          "references/i18n/i18n-perspective.md",
+        "ACCESSIBILITY": "references/accessibility/accessibility-perspective.md",
     }
 
-    # Numeric weights per project type (4 perspectives)
-    # Values: USER, PRODUCT, PROJECT, TECH
+    # Numeric weights per project type (4 core perspectives only, for compat)
     PERSPECTIVE_WEIGHTS: dict[str, tuple[float, float, float, float]] = {
         "前端应用":    (0.35, 0.25, 0.15, 0.25),
         "后端服务":    (0.25, 0.20, 0.20, 0.35),
@@ -3340,7 +3591,7 @@ class FourPerspectiveScanner:
         "通用项目":    (0.25, 0.25, 0.25, 0.25),
     }
 
-    # Priority order for each project type (which perspectives to check first)
+    # Priority order for each project type (4 core perspectives, for compat)
     PERSPECTIVE_PRIORITY: dict[str, list[str]] = {
         "前端应用":    ["USER", "PRODUCT", "TECH", "PROJECT"],
         "后端服务":    ["TECH", "USER", "PRODUCT", "PROJECT"],
@@ -4016,15 +4267,19 @@ class FourPerspectiveScanner:
 
     def scan(self) -> list[PerspectiveFinding]:
         """
-        Run all four perspective scanners and merge their findings.
+        Run all active perspective scanners and merge their findings.
+        v4.0: Data-driven, 19 perspectives, execution levels 0→3.
 
         Workflow:
           1. Detect project type (via project-standard/project-types.md)
-          2. Scan from 4 perspectives in priority order (project-type-dependent)
-          3. Each perspective uses project-standard's reference docs + weights
+          2. Load active perspectives from perspective-config.yaml
+          3. Scan in execution-level order (Level 0 → 1 → 2 → 3)
+          4. Each perspective uses project-standard's reference docs + weights
         """
         all_findings: list[PerspectiveFinding] = []
-        print(f"[FourPerspectiveScanner] Starting 4-perspective scan of {len(self.repos)} repos...")
+        active = self._persp_config.get_active_perspectives()
+        print(f"[FourPerspectiveScanner] Starting {len(active)}-perspective scan of {len(self.repos)} repos...")
+
         for repo in self.repos:
             if not repo.auto_monitor:
                 continue
@@ -4032,37 +4287,45 @@ class FourPerspectiveScanner:
             if not repo_path.exists():
                 continue
 
-            # Step 1: Detect project type
+            # Step 1: Detect project type (for weight calculation)
             project_type, weights_str = self._detect_project_type(repo_path)
             numeric_weights = self.PERSPECTIVE_WEIGHTS.get(project_type, (0.25, 0.25, 0.25, 0.25))
-            priority_order = self.PERSPECTIVE_PRIORITY.get(project_type, ["USER", "PRODUCT", "PROJECT", "TECH"])
             weight_map = dict(zip(["USER", "PRODUCT", "PROJECT", "TECH"], numeric_weights))
 
             print(f"\n  [TYPE] {project_type}")
-            print(f"  [WEIGHTS] " + " / ".join(f"{p}={weight_map[p]*100:.0f}%" for p in priority_order))
+            print(f"  [PERSPECTIVES] {len(active)} active: {', '.join(active)}")
 
             # Load scan history for this repo (P1: persistence)
             scan_history = self._load_scan_history(repo_path)
 
-            # Step 2: Scan in priority order
-            print(f"\n  Scanning {repo_path.name} in order: {' → '.join(priority_order)}")
-            for perspective in priority_order:
-                meta = PERSPECTIVE_META[perspective]
-                weight = weight_map[perspective]
-                print(f"    [{perspective}] {meta['icon']} {meta['label']} (weight={weight:.0%})...")
-                findings = self._scan_by_perspective(
-                    repo, perspective, project_type,
-                    weight=weight,
-                    prev_findings=scan_history.get(perspective, [])
-                )
-                if findings:
-                    print(f"      → Found {len(findings)} finding(s)")
-                    # Mark which are new vs still open
-                    for f in findings:
-                        is_new = self._is_new_finding(f, scan_history.get(perspective, []))
-                        if is_new:
-                            f.description = f"[NEW] {f.description}"
-                all_findings.extend(findings)
+            # Step 2: Scan by execution level (Level 0 parallel → 1 → 2 → 3)
+            levels = self._persp_config.get_levels()
+            for lvl in sorted(levels.keys()):
+                lvl_persps = [p for p in levels[lvl] if p in active]
+                if not lvl_persps:
+                    continue
+                level_label = {0: "Foundation", 1: "Quality Gates", 2: "Operational", 3: "Delivery"}.get(lvl, f"Level{lvl}")
+                print(f"\n  ── Level {lvl}: {level_label} ──")
+
+                for perspective in lvl_persps:
+                    meta = PERSPECTIVE_META.get(perspective, {"icon": "📋", "label": perspective})
+                    weight = weight_map.get(perspective, 1.0 / len(lvl_persps) if lvl_persps else 0.2)
+                    persp_def = self._persp_config.get_perspective(perspective)
+                    print(f"    [{perspective}] {meta['icon']} {meta['label']} (weight={weight:.0%}, level={lvl})...")
+
+                    findings = self._scan_by_perspective(
+                        repo, perspective, project_type,
+                        weight=weight,
+                        prev_findings=scan_history.get(perspective, []),
+                        persp_def=persp_def,
+                    )
+                    if findings:
+                        print(f"      → Found {len(findings)} finding(s)")
+                        for f in findings:
+                            is_new = self._is_new_finding(f, scan_history.get(perspective, []))
+                            if is_new:
+                                f.description = f"[NEW] {f.description}"
+                    all_findings.extend(findings)
 
             # Save updated scan history
             self._save_scan_history(repo_path, all_findings)
@@ -4073,24 +4336,60 @@ class FourPerspectiveScanner:
     def _scan_by_perspective(self, repo: Repository, perspective: str,
                               project_type: str = "通用项目",
                               weight: float = 0.25,
-                              prev_findings: list = None) -> list[PerspectiveFinding]:
-        """Dispatch to the right perspective scanner, passing project type + weight."""
+                              prev_findings: list = None,
+                              persp_def: Optional[PerspectiveDef] = None
+                              ) -> list[PerspectiveFinding]:
+        """Dispatch to the right perspective scanner (19 perspectives, 4 levels)."""
+        # Level 0: core foundations
         if perspective == "USER":
-            return self._scan_user(repo, project_type, weight)
+            return self._scan_user(repo, project_type, weight, persp_def)
         elif perspective == "PRODUCT":
-            return self._scan_product(repo, project_type, weight)
+            return self._scan_product(repo, project_type, weight, persp_def)
         elif perspective == "PROJECT":
-            return self._scan_project(repo, project_type, weight)
+            return self._scan_project(repo, project_type, weight, persp_def)
         elif perspective == "TECH":
-            return self._scan_tech(repo, project_type, weight)
+            return self._scan_tech(repo, project_type, weight, persp_def)
+        # Level 1: quality gates
+        elif perspective == "SECURITY":
+            return self._scan_security(repo, project_type, weight, persp_def)
+        elif perspective == "TESTING":
+            return self._scan_testing(repo, project_type, weight, persp_def)
+        elif perspective == "COMPATIBILITY":
+            return self._scan_compatibility(repo, project_type, weight, persp_def)
+        # Level 2: operational excellence
+        elif perspective == "INTEGRATION":
+            return self._scan_integration(repo, project_type, weight, persp_def)
+        elif perspective == "OBSERVABILITY":
+            return self._scan_observability(repo, project_type, weight, persp_def)
+        elif perspective == "RELIABILITY":
+            return self._scan_reliability(repo, project_type, weight, persp_def)
+        elif perspective == "COST_EFFICIENCY":
+            return self._scan_cost_efficiency(repo, project_type, weight, persp_def)
+        elif perspective == "MARKET_INFLUENCE":
+            return self._scan_market_influence(repo, project_type, weight, persp_def)
+        elif perspective == "BUSINESS_SUSTAINABILITY":
+            return self._scan_business_sustainability(repo, project_type, weight, persp_def)
+        elif perspective == "INDUSTRY_VERTICAL":
+            return self._scan_industry_vertical(repo, project_type, weight, persp_def)
+        elif perspective == "BUSINESS_COMPLIANCE":
+            return self._scan_business_compliance(repo, project_type, weight, persp_def)
+        # Level 3: delivery quality
+        elif perspective == "DOCUMENTATION":
+            return self._scan_documentation(repo, project_type, weight, persp_def)
+        elif perspective == "I18N":
+            return self._scan_i18n(repo, project_type, weight, persp_def)
+        elif perspective == "ACCESSIBILITY":
+            return self._scan_accessibility(repo, project_type, weight, persp_def)
         return []
 
     def _scan_user(self, repo: Repository, project_type: str = "通用项目",
-                   weight: float = 0.25) -> list[PerspectiveFinding]:
+                   weight: float = 0.25,
+                   persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
         """
         👤 用户视角: Is it easy and pleasant to use?
         Uses project-standard's user/user-perspective.md as evaluation criteria.
         v4.2: Weight-aware scanning + prior findings context.
+        v4.0: Data-driven, accepts PerspectiveDef.
         """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
@@ -4141,11 +4440,12 @@ class FourPerspectiveScanner:
         return self._parse_llm_findings(result, "USER")
 
     def _scan_product(self, repo: Repository, project_type: str = "通用项目",
-                      weight: float = 0.25) -> list[PerspectiveFinding]:
+                      weight: float = 0.25,
+                      persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
         """
         📦 产品视角: Does it actually solve what it claims to solve?
         Uses project-standard's product-requirements.md as evaluation criteria.
-        v4.2: Weight-aware scanning.
+        v4.2: Weight-aware scanning. v4.0: Data-driven.
         """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
@@ -4193,11 +4493,12 @@ class FourPerspectiveScanner:
         return self._parse_llm_findings(result, "PRODUCT")
 
     def _scan_project(self, repo: Repository, project_type: str = "通用项目",
-                     weight: float = 0.25) -> list[PerspectiveFinding]:
+                     weight: float = 0.25,
+                     persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
         """
         🏗 项目视角: Is the project运作得好？
         Uses project-standard's project-inspection.md as evaluation criteria.
-        v4.2: Weight-aware scanning.
+        v4.2: Weight-aware scanning. v4.0: Data-driven.
         """
         config = get_openclaw_llm_config()
         if not config.get("api_key") or not config.get("base_url"):
@@ -4285,12 +4586,12 @@ class FourPerspectiveScanner:
         return findings
 
     def _scan_tech(self, repo: Repository, project_type: str = "通用项目",
-                  weight: float = 0.25) -> list[PerspectiveFinding]:
+                  weight: float = 0.25,
+                  persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
         """
         ⚙️ 技术视角: Is the code healthy?
         Uses project-standard's code-standards.md as evaluation criteria.
-
-        v4.2: LLM-driven scan + project-type-aware checks (security + performance) + weight-aware.
+        v4.2: LLM-driven scan + project-type-aware checks. v4.0: Data-driven.
         """
         config = get_openclaw_llm_config()
         repo_path = repo.resolve_path()
@@ -4381,6 +4682,424 @@ class FourPerspectiveScanner:
             api_key=config["api_key"],
         )
         return self._parse_llm_findings(result_raw, "TECH")
+
+    # ===========================================================================
+    # NEW PERSPECTIVE SCANNERS (v4.0) — Level 1-3 perspectives
+    # ===========================================================================
+
+    def _build_llm_prompt(self, repo: Repository, perspective: str,
+                           persp_def: Optional[PerspectiveDef],
+                           project_type: str,
+                           weight: float,
+                           question: str,
+                           focus_items: str) -> tuple[str, str]:
+        """
+        Build a standardized LLM prompt for a perspective scan.
+        Returns (system_prompt, user_prompt).
+        """
+        repo_path = repo.resolve_path()
+        context = self._gather_context(repo)
+        ref_doc = self._project_standard_docs.get(perspective, "")
+
+        persp_meta = PERSPECTIVE_META.get(perspective, {})
+        icon = persp_meta.get("icon", "📋")
+        label = persp_meta.get("label", perspective)
+
+        if persp_def and persp_def.llm_focus:
+            focus = persp_def.llm_focus
+        else:
+            focus = focus_items
+
+        if weight >= 0.30:
+            weight_note = f"此视角权重较高({weight:.0%})，请格外仔细检查。"
+        elif weight >= 0.20:
+            weight_note = f"此视角权重中等({weight:.0%})，按标准检查即可。"
+        else:
+            weight_note = f"此视角权重较低({weight:.0%})，可以简略检查。"
+
+        system = (
+            f"你是一个{persp_def.display_name if persp_def else label}专家。回复中文。"
+            f"\n【身份】{self.effective_persona}"
+            f"\n【上下文】{self.master_summary[:400]}"
+            f"\n【评判标准】{ref_doc[:2000] if ref_doc else '(无可用标准)'}"
+        )
+        prompt = (
+            f"你收到了这条飞书消息：\n"
+            f"""{question}"""
+
+            f"\n\n【项目类型】{project_type}"
+            f"\n【视角】{icon} {label} (weight={weight:.0%})"
+            f"\n【重点提示】{weight_note}"
+            f"\n【检查重点】{focus}"
+            f"\n【评判标准】\n{ref_doc[:2500] if ref_doc else '(无可用标准，使用内置检查项)'}\n\n"
+            f"{focus_items}\n\n"
+            f"返回 JSON 数组，每个元素：\n"
+            f"  insight: (string, 中文) 你发现了什么问题\n"
+            f"  category: (string) 具体问题类别\n"
+            f"  impact: (float 0.0-1.0) 对项目的影响程度\n"
+            f"  evidence: (array) 支持观点的代码/文档片段（1-2条，每条<100字）\n"
+            f"  suggested_fix: (string, 中文) 具体改进建议\n"
+            f"  why_now: (string, 中文, 可选) 为什么现在重要\n"
+            f"  repo_path: (string) 相关文件或空字符串\n\n"
+            f"如果没有发现任何问题，返回空数组 []。\n"
+            f"Context:\n{context[:6000]}"
+        )
+        return system, prompt
+
+    # ---- Level 1: Quality Gates -----------------------------------------
+
+    def _scan_security(self, repo: Repository, project_type: str = "通用项目",
+                       weight: float = 0.25,
+                       persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🔒 安全视角: Check for security vulnerabilities.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在安全层面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 硬编码密码/Token/Secret\n"
+            "  2. SQL/NoSQL注入风险\n"
+            "  3. XSS/CSRF漏洞\n"
+            "  4. 弱鉴权或认证绕过\n"
+            "  5. 敏感信息泄露（日志、错误信息）"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "SECURITY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "SECURITY")
+
+    def _scan_testing(self, repo: Repository, project_type: str = "通用项目",
+                       weight: float = 0.25,
+                       persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🧪 测试视角: Check for test coverage and quality issues.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在测试方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 测试覆盖率不足的模块\n"
+            "  2. 测试质量差（只测happy path）\n"
+            "  3. 缺失边界条件测试\n"
+            "  4. 冒烟测试缺失\n"
+            "  5. 测试隔离问题"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "TESTING", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "TESTING")
+
+    def _scan_compatibility(self, repo: Repository, project_type: str = "通用项目",
+                             weight: float = 0.25,
+                             persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🔄 兼容性视角: Check for version and platform compatibility issues.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在兼容性方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. Python多版本兼容性（3.9/3.11/3.12）\n"
+            "  2. Node版本要求\n"
+            "  3. 浏览器兼容性问题（前端）\n"
+            "  4. API版本破坏性变更\n"
+            "  5. 第三方依赖版本冲突"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "COMPATIBILITY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "COMPATIBILITY")
+
+    # ---- Level 2: Operational Excellence --------------------------------
+
+    def _scan_integration(self, repo: Repository, project_type: str = "通用项目",
+                           weight: float = 0.25,
+                           persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🔗 集成视角: Check for external API and integration issues.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在第三方集成方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 外部API调用缺少重试机制\n"
+            "  2. Webhook可靠性问题\n"
+            "  3. SDK版本漂移\n"
+            "  4. 消息队列消费失败处理\n"
+            "  5. 超时配置不合理"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "INTEGRATION", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "INTEGRATION")
+
+    def _scan_observability(self, repo: Repository, project_type: str = "通用项目",
+                              weight: float = 0.25,
+                              persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        📊 可观测性视角: Check for logging, metrics, and tracing gaps.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在可观测性方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 日志不完整或日志级别错误\n"
+            "  2. 缺少业务指标\n"
+            "  3. 链路追踪缺失\n"
+            "  4. 告警阈值设置不合理\n"
+            "  5. 缺少健康检查接口"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "OBSERVABILITY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "OBSERVABILITY")
+
+    def _scan_reliability(self, repo: Repository, project_type: str = "通用项目",
+                           weight: float = 0.25,
+                           persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🛡 可靠性视角: Check for SLA, circuit breakers, and graceful degradation.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在可靠性方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 缺少熔断降级机制\n"
+            "  2. 重试机制缺失或不正确\n"
+            "  3. 超时配置问题\n"
+            "  4. 非幂等操作\n"
+            "  5. SLA达标风险"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "RELIABILITY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "RELIABILITY")
+
+    def _scan_cost_efficiency(self, repo: Repository, project_type: str = "通用项目",
+                               weight: float = 0.25,
+                               persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        💰 成本效率视角: Check for API cost, resource waste, and optimization opportunities.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在成本效率方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. API调用次数过多或重复\n"
+            "  2. 云资源浪费（空闲实例、过度配置）\n"
+            "  3. 缓存策略不当\n"
+            "  4. 批处理优化机会\n"
+            "  5. LLM调用频率过高"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "COST_EFFICIENCY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "COST_EFFICIENCY")
+
+    def _scan_market_influence(self, repo: Repository, project_type: str = "通用项目",
+                                weight: float = 0.25,
+                                persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        📈 市场影响视角: Check for competitive positioning and community health.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在市场竞争和社区活跃度方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 与竞品相比的差距\n"
+            "  2. 功能差异化不明显\n"
+            "  3. 发布节奏不规律\n"
+            "  4. 社区活跃度低\n"
+            "  5. 用户口碑问题"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "MARKET_INFLUENCE", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "MARKET_INFLUENCE")
+
+    def _scan_business_sustainability(self, repo: Repository, project_type: str = "通用项目",
+                                      weight: float = 0.25,
+                                      persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🌱 商业可持续性视角: Check for business model alignment and scalability.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在商业可持续性方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 商业模式与功能不匹配\n"
+            "  2. 收入来源单一或不稳定\n"
+            "  3. 用户流失风险\n"
+            "  4. 成本结构不合理\n"
+            "  5. 扩展性限制"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "BUSINESS_SUSTAINABILITY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "BUSINESS_SUSTAINABILITY")
+
+    def _scan_industry_vertical(self, repo: Repository, project_type: str = "通用项目",
+                                 weight: float = 0.25,
+                                 persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🏭 行业垂直视角: Check for industry-specific compliance and standards.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在行业合规方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 相关行业标准未满足\n"
+            "  2. 监管要求未覆盖\n"
+            "  3. 数据主权问题\n"
+            "  4. 行业协议兼容性"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "INDUSTRY_VERTICAL", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "INDUSTRY_VERTICAL")
+
+    def _scan_business_compliance(self, repo: Repository, project_type: str = "通用项目",
+                                   weight: float = 0.25,
+                                   persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        ⚖️ 商业合规视角: Check for license, privacy, and IP compliance.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在许可证和合规方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 依赖许可证不兼容\n"
+            "  2. GDPR/CCPA等隐私法规不合规\n"
+            "  3. 知识产权问题\n"
+            "  4. 合同义务风险"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "BUSINESS_COMPLIANCE", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "BUSINESS_COMPLIANCE")
+
+    # ---- Level 3: Delivery Quality ---------------------------------------
+
+    def _scan_documentation(self, repo: Repository, project_type: str = "通用项目",
+                              weight: float = 0.25,
+                              persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        📚 文档视角: Check for README, API docs, and changelog completeness.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在文档方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. README不完整或过时\n"
+            "  2. API文档缺失或错误\n"
+            "  3. 示例代码不可运行\n"
+            "  4. CHANGELOG缺失\n"
+            "  5. 贡献指南缺失"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "DOCUMENTATION", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "DOCUMENTATION")
+
+    def _scan_i18n(self, repo: Repository, project_type: str = "通用项目",
+                    weight: float = 0.25,
+                    persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        🌍 国际化视角: Check for hardcoded strings and i18n coverage.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在国际化方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. 硬编码字符串未提取\n"
+            "  2. 多语言覆盖不足\n"
+            "  3. 日期/货币格式问题\n"
+            "  4. RTL语言支持缺失\n"
+            "  5. 翻译质量差"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "I18N", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "I18N")
+
+    def _scan_accessibility(self, repo: Repository, project_type: str = "通用项目",
+                             weight: float = 0.25,
+                             persp_def: Optional[PerspectiveDef] = None) -> list[PerspectiveFinding]:
+        """
+        ♿ 可访问性视角: Check for ARIA, keyboard nav, and color contrast issues.
+        """
+        config = get_openclaw_llm_config()
+        if not config.get("api_key") or not config.get("base_url"):
+            return []
+        question = f"你觉得 {repo.resolve_path().name} 这个项目在可访问性方面有什么问题？"
+        focus_items = (
+            "重点检查：\n"
+            "  1. ARIA标签缺失\n"
+            "  2. 键盘导航问题\n"
+            "  3. 颜色对比度不足\n"
+            "  4. 屏幕阅读器兼容问题\n"
+            "  5. 焦点管理问题"
+        )
+        system, prompt = self._build_llm_prompt(
+            repo, "ACCESSIBILITY", persp_def, project_type, weight, question, focus_items
+        )
+        result = call_llm(prompt=prompt, system=system,
+                          model=config["model"], base_url=config["base_url"], api_key=config["api_key"])
+        return self._parse_llm_findings(result, "ACCESSIBILITY")
+
 
 
     def _gather_context(self, repo: Repository) -> str:
@@ -4954,7 +5673,10 @@ class FourPerspectiveScanner:
 
 
 def print_product_findings(findings: list[PerspectiveFinding]) -> None:
-    """Display findings grouped by perspective with icons and impact bars."""
+    """
+    Display findings grouped by perspective with icons and impact bars.
+    v4.0: Supports all 19 perspectives across 4 execution levels.
+    """
     if not findings:
         print(f"\n🎯 Product Evolution Insights: none (all clear — or LLM returned empty)")
         return
@@ -4964,10 +5686,15 @@ def print_product_findings(findings: list[PerspectiveFinding]) -> None:
     for f in findings:
         by_perspective.setdefault(f.perspective, []).append(f)
 
-    print(f"\n🎯 Four-Perspective Insights ({len(findings)} total):")
-    print("=" * 62)
+    # Use perspective config for ordered display
+    persp_config = get_perspective_config()
+    active_persps = persp_config.get_active_perspectives()
+    total_persps = len(active_persps)
 
-    # Icons per category
+    print(f"\n🎯 Multi-Perspective Insights ({len(findings)} total across {total_persps} perspectives):")
+    print("=" * 70)
+
+    # Icons per category (all 19 perspectives)
     category_icons = {
         # USER
         "cli_design": "🎨",
@@ -4986,44 +5713,145 @@ def print_product_findings(findings: list[PerspectiveFinding]) -> None:
         "config_issue": "⚙️",
         "dependency_issue": "📦",
         # TECH
+        "security": "🔒",
+        "performance": "⚡",
+        "code_quality": "📋",
+        "error_handling": "💥",
         "duplicate_code": "📋",
         "long_function": "📏",
         "missing_test": "🧪",
         "dead_code": "💀",
+        # SECURITY
+        "hardcoded_secret": "🔑",
+        "injection": "💉",
+        "xss": "⚠️",
+        "weak_auth": "🔓",
+        "insecure_tls": "🔐",
+        # TESTING
+        "low_coverage": "📉",
+        "weak_test_quality": "🧪",
+        "missing_edge_case": "⚠️",
+        "flaky_test": "🔄",
+        "missing_smoke_test": "💨",
+        # COMPATIBILITY
+        "python_version_gap": "🐍",
+        "node_version_gap": "📦",
+        "browser_compat": "🌐",
+        "api_version_break": "🔀",
+        # INTEGRATION
+        "api_integration_gap": "🔗",
+        "sdk_version_drift": "📦",
+        "webhook_reliability": "⚓",
+        "queue_bottleneck": "🚧",
+        # OBSERVABILITY
+        "missing_logging": "📝",
+        "missing_metrics": "📊",
+        "missing_tracing": "🔍",
+        "alert_fatigue": "🔔",
+        "missing_health_check": "❤️",
+        # RELIABILITY
+        "sla_violation_risk": "⚠️",
+        "missing_circuit_breaker": "🔌",
+        "missing_retry": "🔄",
+        "timeout_misconfiguration": "⏱",
+        "non_idempotent_operation": "⚡",
+        # COST_EFFICIENCY
+        "api_cost_issue": "💰",
+        "resource_waste": "🗑",
+        "poor_cache_strategy": "💾",
+        "batch_opportunity": "📦",
+        "llm_call_frequency": "🤖",
+        # MARKET_INFLUENCE
+        "competitive_gap": "📊",
+        "feature_differentiation": "🎯",
+        "release_rhythm": "⏰",
+        "community_health": "👥",
+        "user_sentiment": "💬",
+        # BUSINESS_SUSTAINABILITY
+        "biz_model_mismatch": "🎯",
+        "revenue_risk": "💵",
+        "churn_risk": "📉",
+        "cost_structure_issue": "💰",
+        "scalability_limit": "📈",
+        # INDUSTRY_VERTICAL
+        "compliance_gap": "⚖️",
+        "data_sovereignty": "🌍",
+        "regulatory_mismatch": "📋",
+        "industry_protocol": "🏭",
+        # BUSINESS_COMPLIANCE
+        "license_violation": "📜",
+        "privacy_violation": "🔒",
+        "ip_issue": "©",
+        "contract_risk": "⚖️",
+        # DOCUMENTATION
+        "incomplete_readme": "📄",
+        "missing_api_doc": "📚",
+        "broken_example": "❌",
+        "missing_changelog": "📝",
+        "missing_contributing": "🤝",
+        # I18N
+        "hardcoded_string": "🔤",
+        "missing_translation": "🌍",
+        "locale_format_issue": "📅",
+        "rtl_gap": "↔️",
+        "translation_quality": "💬",
+        # ACCESSIBILITY
+        "missing_aria": "♿",
+        "keyboard_nav_gap": "⌨️",
+        "color_contrast_issue": "🎨",
+        "screen_reader_gap": "👁",
+        "focus_management": "🎯",
     }
 
-    # Display order: USER > PRODUCT > PROJECT > TECH
-    for perspective in ["USER", "PRODUCT", "PROJECT", "TECH"]:
-        items = by_perspective.get(perspective, [])
-        if not items:
+    # Display by execution level
+    levels = persp_config.get_levels()
+    level_names = {
+        0: "Foundation (核心)",
+        1: "Quality Gates (质量门控)",
+        2: "Operational Excellence (运营卓越)",
+        3: "Delivery Quality (交付质量)",
+    }
+
+    total_findings = 0
+    for lvl in sorted(levels.keys()):
+        lvl_persps = [p for p in levels[lvl] if p in active_persps]
+        lvl_items = [f for p in lvl_persps for f in by_perspective.get(p, [])]
+        if not lvl_items:
             continue
-        meta = PERSPECTIVE_META[perspective]
-        stars = "⭐" * meta["stars"]
-        print(f"\n{'━' * 62}")
-        print(f"{meta['icon']} {meta['label']} {stars}")
-        print(f"{'━' * 62}")
 
-        for i, f in enumerate(items[:10], 1):
-            icon = category_icons.get(f.category, "❓")
-            impact_bar = "█" * int(f.impact_score * 10) + "░" * (10 - int(f.impact_score * 10))
-            risk_label = f.risk.value.upper()
-            print(f"\n  {i}. {icon} {risk_label} [{f.category}]")
-            print(f"     {f.description}")
-            if f.evidence:
-                print(f"     Evidence: {' | '.join(str(e)[:60] for e in f.evidence[:2])}")
-            print(f"     Impact: {impact_bar} {f.impact_score:.1f}")
-            if f.suggested_direction:
-                print(f"     → {f.suggested_direction}")
-            if f.why_now:
-                print(f"     ⏱ {f.why_now}")
-            if f.file_path:
-                print(f"     📄 {f.file_path}")
+        print(f"\n{'─' * 70}")
+        print(f"  📌 Level {lvl}: {level_names.get(lvl, f'Level{lvl}')}")
+        print(f"{'─' * 70}")
 
-        if len(items) > 10:
-            print(f"\n  ... and {len(items) - 10} more in {meta['label']}")
+        for perspective in lvl_persps:
+            items = by_perspective.get(perspective, [])
+            if not items:
+                continue
+            meta = PERSPECTIVE_META.get(perspective, {"icon": "📋", "label": perspective, "stars": 3})
+            stars = "⭐" * meta["stars"]
+            print(f"\n  {meta['icon']} {meta['label']} {stars} ({len(items)} findings)")
+            for i, f in enumerate(items[:5], 1):
+                icon = category_icons.get(f.category, "❓")
+                impact_bar = "█" * int(f.impact_score * 10) + "░" * (10 - int(f.impact_score * 10))
+                risk_label = f.risk.value.upper()
+                print(f"\n    {i}. {icon} {risk_label} [{f.category}]")
+                print(f"       {f.description[:80]}")
+                if f.evidence:
+                    print(f"       Evidence: {' | '.join(str(e)[:50] for e in f.evidence[:2])}")
+                print(f"       Impact: {impact_bar} {f.impact_score:.1f}")
+                if f.suggested_direction:
+                    print(f"       → {f.suggested_direction[:80]}")
+                if f.file_path:
+                    print(f"       📄 {f.file_path}")
 
-    print(f"\n{'=' * 62}")
-    print(f"📌 行动优先级：用户 > 产品 > 项目 > 技术")
+            if len(items) > 5:
+                print(f"\n    ... and {len(items) - 5} more in {meta['label']}")
+            total_findings += len(items)
+
+    print(f"\n{'=' * 70}")
+    # Priority hint based on level
+    print("📌 行动优先级: Level 0 (核心) > Level 1 (质量门控) > Level 2 (运营) > Level 3 (交付)")
+    print(f"📊 共 {total_findings} 条发现，分布在 {len(by_perspective)} 个视角")
 
 
 # ===========================================================

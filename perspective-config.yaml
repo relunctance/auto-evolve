@@ -1,0 +1,444 @@
+# =============================================================================
+# Auto-Evolve Perspective Configuration
+# =============================================================================
+# Data-driven perspective definitions for the 19-perspective scan engine.
+# Each perspective has:
+#   - name / display_name / icon / color
+#   - execution_level: 0-3 (controls parallelism grouping)
+#   - doc_path: relative path within project-standard references/
+#   - weight_range: [min, max] weight values this perspective uses
+#   - priority_order: 1-19 (for tie-breaking within level)
+#   - scanner_type: "llm" | "static" | "hybrid"
+#   - llm_focus: what the LLM should focus on for this perspective
+#   - categories: list of finding categories this perspective produces
+#   - enabled: whether to run this perspective (default: true)
+# =============================================================================
+
+execution_levels:
+  # Level 0: Core foundations — run first, in parallel
+  - level: 0
+    perspectives:
+      - USER
+      - PRODUCT
+      - PROJECT
+      - TECH
+  # Level 1: Quality gates — depend on Level 0 findings
+  - level: 1
+    perspectives:
+      - SECURITY
+      - TESTING
+      - COMPATIBILITY
+  # Level 2: Operational excellence — run after Level 0
+  - level: 2
+    perspectives:
+      - INTEGRATION
+      - OBSERVABILITY
+      - RELIABILITY
+      - COST_EFFICIENCY
+      - MARKET_INFLUENCE
+      - BUSINESS_SUSTAINABILITY
+      - INDUSTRY_VERTICAL
+      - BUSINESS_COMPLIANCE
+  # Level 3: Delivery quality — run last
+  - level: 3
+    perspectives:
+      - DOCUMENTATION
+      - I18N
+      - ACCESSIBILITY
+
+# -----------------------------------------------------------------------------
+# Perspective Definitions
+# -----------------------------------------------------------------------------
+
+perspectives:
+
+  # ===========================================================================
+  # LEVEL 0 — Core Foundations
+  # ===========================================================================
+
+  USER:
+    display_name: "用户视角"
+    icon: "👤"
+    color: "#3B82F6"          # blue
+    execution_level: 0
+    priority: 1
+    scanner_type: "llm"
+    doc_path: "references/user/user-perspective.md"
+    llm_focus: "CLI设计、错误提示、上手门槛、容错性、操作流程度"
+    categories:
+      - cli_design
+      - error_message
+      - learning_curve
+      - fault_tolerance
+      - workflow
+    default_weight: 0.25
+    enabled: true
+
+  PRODUCT:
+    display_name: "产品视角"
+    icon: "📦"
+    color: "#8B5CF6"          # purple
+    execution_level: 0
+    priority: 2
+    scanner_type: "llm"
+    doc_path: "references/product/product-perspective.md"
+    llm_focus: "README承诺兑现、文档与代码一致性、功能完整性、缺失功能"
+    categories:
+      - pain_point_unresolved
+      - partial_solution
+      - missing_feature
+      - wrong_approach
+    default_weight: 0.25
+    enabled: true
+
+  PROJECT:
+    display_name: "项目视角"
+    icon: "🏗"
+    color: "#F59E0B"          # amber
+    execution_level: 0
+    priority: 3
+    scanner_type: "llm"
+    doc_path: "references/project/project-perspective.md"
+    llm_focus: "learnings闭环、巡检节奏、配置合理性、依赖健康度、Git实践"
+    categories:
+      - learnings_gap
+      - scan_rhythm
+      - config_issue
+      - dependency_issue
+    default_weight: 0.25
+    enabled: true
+
+  TECH:
+    display_name: "技术视角"
+    icon: "⚙️"
+    color: "#10B981"          # emerald
+    execution_level: 0
+    priority: 4
+    scanner_type: "hybrid"     # static scanner + LLM enhancement
+    doc_path: "references/tech/tech-perspective.md"
+    llm_focus: "代码质量(重复/长函数)、安全漏洞、性能问题、异常处理"
+    categories:
+      - security
+      - performance
+      - code_quality
+      - error_handling
+    default_weight: 0.25
+    enabled: true
+
+  # ===========================================================================
+  # LEVEL 1 — Quality Gates
+  # ===========================================================================
+
+  SECURITY:
+    display_name: "安全视角"
+    icon: "🔒"
+    color: "#EF4444"          # red
+    execution_level: 1
+    priority: 5
+    scanner_type: "llm"
+    doc_path: "references/security/security-perspective.md"
+    llm_focus: "硬编码密码/Token、SQL/NoSQL注入、XSS/CSRF、弱鉴权、敏感信息泄露"
+    categories:
+      - hardcoded_secret
+      - injection
+      - xss
+      - weak_auth
+      - insecure_tls
+    default_weight: 0.30
+    enabled: true
+
+  TESTING:
+    display_name: "测试视角"
+    icon: "🧪"
+    color: "#06B6D4"          # cyan
+    execution_level: 1
+    priority: 6
+    scanner_type: "llm"
+    doc_path: "references/testing/testing-perspective.md"
+    llm_focus: "测试覆盖率、测试质量、测试隔离、边界条件、冒烟测试"
+    categories:
+      - low_coverage
+      - weak_test_quality
+      - missing_edge_case
+      - flaky_test
+      - missing_smoke_test
+    default_weight: 0.20
+    enabled: true
+
+  COMPATIBILITY:
+    display_name: "兼容性视角"
+    icon: "🔄"
+    color: "#84CC16"          # lime
+    execution_level: 1
+    priority: 7
+    scanner_type: "llm"
+    doc_path: "references/compatibility/compatibility-perspective.md"
+    llm_focus: "多Python版本兼容、多Node版本兼容、浏览器兼容、API版本兼容性"
+    categories:
+      - python_version_gap
+      - node_version_gap
+      - browser_compat
+      - api_version_break
+    default_weight: 0.15
+    enabled: true
+
+  # ===========================================================================
+  # LEVEL 2 — Operational Excellence
+  # ===========================================================================
+
+  INTEGRATION:
+    display_name: "集成视角"
+    icon: "🔗"
+    color: "#F97316"          # orange
+    execution_level: 2
+    priority: 8
+    scanner_type: "llm"
+    doc_path: "references/integration/integration-perspective.md"
+    llm_focus: "外部API集成、第三方SDK集成、webhook可靠性、消息队列、事件驱动架构"
+    categories:
+      - api_integration_gap
+      - sdk_version_drift
+      - webhook_reliability
+      - queue_bottleneck
+    default_weight: 0.15
+    enabled: true
+
+  OBSERVABILITY:
+    display_name: "可观测性视角"
+    icon: "📊"
+    color: "#EC4899"          # pink
+    execution_level: 2
+    priority: 9
+    scanner_type: "llm"
+    doc_path: "references/observability/observability-perspective.md"
+    llm_focus: "日志完备性、指标覆盖、链路追踪、告警阈值、健康检查"
+    categories:
+      - missing_logging
+      - missing_metrics
+      - missing_tracing
+      - alert_fatigue
+      - missing_health_check
+    default_weight: 0.15
+    enabled: true
+
+  RELIABILITY:
+    display_name: "可靠性视角"
+    icon: "🛡"
+    color: "#14B8A6"          # teal
+    execution_level: 2
+    priority: 10
+    scanner_type: "llm"
+    doc_path: "references/reliability/reliability-perspective.md"
+    llm_focus: "SLA达标、熔断降级、重试机制、超时配置、幂等性"
+    categories:
+      - sla_violation_risk
+      - missing_circuit_breaker
+      - missing_retry
+      - timeout_misconfiguration
+      - non_idempotent_operation
+    default_weight: 0.15
+    enabled: true
+
+  COST_EFFICIENCY:
+    display_name: "成本效率视角"
+    icon: "💰"
+    color: "#A855F7"          # violet
+    execution_level: 2
+    priority: 11
+    scanner_type: "llm"
+    doc_path: "references/cost_efficiency/cost-efficiency-perspective.md"
+    llm_focus: "API调用成本、云资源浪费、缓存策略、批处理优化、LLM调用频率"
+    categories:
+      - api_cost_issue
+      - resource_waste
+      - poor_cache_strategy
+      - batch_opportunity
+      - llm_call_frequency
+    default_weight: 0.10
+    enabled: true
+
+  MARKET_INFLUENCE:
+    display_name: "市场影响视角"
+    icon: "📈"
+    color: "#0EA5E9"          # sky
+    execution_level: 2
+    priority: 12
+    scanner_type: "llm"
+    doc_path: "references/market_influence/market-influence-perspective.md"
+    llm_focus: "竞品对比、功能差异化、用户口碑、发布节奏、社区活跃度"
+    categories:
+      - competitive_gap
+      - feature_differentiation
+      - release_rhythm
+      - community_health
+      - user_sentiment
+    default_weight: 0.10
+    enabled: true
+
+  BUSINESS_SUSTAINABILITY:
+    display_name: "商业可持续性视角"
+    icon: "🌱"
+    color: "#22C55E"          # green
+    execution_level: 2
+    priority: 13
+    scanner_type: "llm"
+    doc_path: "references/business_sustainability/business-sustainability-perspective.md"
+    llm_focus: "商业模式一致性、收入来源、用户留存、成本结构、扩展性"
+    categories:
+      - biz_model_mismatch
+      - revenue_risk
+      - churn_risk
+      - cost_structure_issue
+      - scalability_limit
+    default_weight: 0.10
+    enabled: true
+
+  INDUSTRY_VERTICAL:
+    display_name: "行业垂直视角"
+    icon: "🏭"
+    color: "#64748B"          # slate
+    execution_level: 2
+    priority: 14
+    scanner_type: "llm"
+    doc_path: "references/industry_vertical/industry-vertical-perspective.md"
+    llm_focus: "行业合规、特定行业协议、数据主权、监管要求"
+    categories:
+      - compliance_gap
+      - data_sovereignty
+      - regulatory_mismatch
+      - industry_protocol
+    default_weight: 0.10
+    enabled: true
+
+  BUSINESS_COMPLIANCE:
+    display_name: "商业合规视角"
+    icon: "⚖️"
+    color: "#78716C"          # stone
+    execution_level: 2
+    priority: 15
+    scanner_type: "llm"
+    doc_path: "references/business_compliance/business-compliance-perspective.md"
+    llm_focus: "许可证合规、数据隐私(GDPR/CCPA)、知识产权、合同义务"
+    categories:
+      - license_violation
+      - privacy_violation
+      - ip_issue
+      - contract_risk
+    default_weight: 0.15
+    enabled: true
+
+  # ===========================================================================
+  # LEVEL 3 — Delivery Quality
+  # ===========================================================================
+
+  DOCUMENTATION:
+    display_name: "文档视角"
+    icon: "📚"
+    color: "#0D9488"          # teal
+    execution_level: 3
+    priority: 16
+    scanner_type: "llm"
+    doc_path: "references/documentation/documentation-perspective.md"
+    llm_focus: "README完整性、API文档、示例代码、CHANGELOG、贡献指南"
+    categories:
+      - incomplete_readme
+      - missing_api_doc
+      - broken_example
+      - missing_changelog
+      - missing_contributing
+    default_weight: 0.20
+    enabled: true
+
+  I18N:
+    display_name: "国际化视角"
+    icon: "🌍"
+    color: "#2DD4BF"          # teal-light
+    execution_level: 3
+    priority: 17
+    scanner_type: "llm"
+    doc_path: "references/i18n/i18n-perspective.md"
+    llm_focus: "硬编码字符串、多语言覆盖、日期/货币格式、RTL支持、翻译质量"
+    categories:
+      - hardcoded_string
+      - missing_translation
+      - locale_format_issue
+      - rtl_gap
+      - translation_quality
+    default_weight: 0.10
+    enabled: true
+
+  ACCESSIBILITY:
+    display_name: "可访问性视角"
+    icon: "♿"
+    color: "#FACC15"          # yellow
+    execution_level: 3
+    priority: 18
+    scanner_type: "llm"
+    doc_path: "references/accessibility/accessibility-perspective.md"
+    llm_focus: "ARIA标签、键盘导航、颜色对比度、屏幕阅读器支持、焦点管理"
+    categories:
+      - missing_aria
+      - keyboard_nav_gap
+      - color_contrast_issue
+      - screen_reader_gap
+      - focus_management
+    default_weight: 0.10
+    enabled: true
+
+# -----------------------------------------------------------------------------
+# Backward-compatibility defaults (used when config is absent or empty)
+# These match the original 4-perspective behavior exactly.
+# -----------------------------------------------------------------------------
+fallback_4_perspective:
+  execution_levels:
+    - level: 0
+      perspectives: [USER, PRODUCT, PROJECT, TECH]
+  perspectives:
+    USER:
+      display_name: "用户视角"
+      icon: "👤"
+      color: "#3B82F6"
+      execution_level: 0
+      priority: 1
+      scanner_type: "llm"
+      doc_path: "references/user/user-perspective.md"
+      llm_focus: "CLI设计、错误提示、上手门槛、容错性、操作流程度"
+      categories: [cli_design, error_message, learning_curve, fault_tolerance, workflow]
+      default_weight: 0.25
+      enabled: true
+    PRODUCT:
+      display_name: "产品视角"
+      icon: "📦"
+      color: "#8B5CF6"
+      execution_level: 0
+      priority: 2
+      scanner_type: "llm"
+      doc_path: "references/product/product-perspective.md"
+      llm_focus: "README承诺兑现、文档与代码一致性、功能完整性、缺失功能"
+      categories: [pain_point_unresolved, partial_solution, missing_feature, wrong_approach]
+      default_weight: 0.25
+      enabled: true
+    PROJECT:
+      display_name: "项目视角"
+      icon: "🏗"
+      color: "#F59E0B"
+      execution_level: 0
+      priority: 3
+      scanner_type: "llm"
+      doc_path: "references/project/project-perspective.md"
+      llm_focus: "learnings闭环、巡检节奏、配置合理性、依赖健康度、Git实践"
+      categories: [learnings_gap, scan_rhythm, config_issue, dependency_issue]
+      default_weight: 0.25
+      enabled: true
+    TECH:
+      display_name: "技术视角"
+      icon: "⚙️"
+      color: "#10B981"
+      execution_level: 0
+      priority: 4
+      scanner_type: "hybrid"
+      doc_path: "references/tech/tech-perspective.md"
+      llm_focus: "代码质量(重复/长函数)、安全漏洞、性能问题、异常处理"
+      categories: [security, performance, code_quality, error_handling]
+      default_weight: 0.25
+      enabled: true
