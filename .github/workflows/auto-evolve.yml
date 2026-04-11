@@ -1,10 +1,7 @@
 name: Auto-Evolve Scan
 
+# Only run manually (workflow_dispatch) — no automatic emails on every push
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  push:
-    branches: [master, main]
   workflow_dispatch:
     inputs:
       target_repo:
@@ -76,4 +73,4 @@ jobs:
       - name: Scan summary
         if: always()
         run: |
-          echo "Scan completed at ${{ github.event_name }}"
+          echo "Scan completed"
